@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Django
+db.sqlite3
+media/
+staticfiles/
+db.py
+
+# Migrations (optional – see note below)
+**/migrations/*
+!**/migrations/__init__.py
+pathology_app/migrations/*.py
+!pathology_app_app/migrations/__init__.py
+auth_app/migrations/*.py
+!auth_app/migrations/__init__.py
+# Environment variables
+.env
+.env.*
+
+# Logs
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+TODO.md
