@@ -105,6 +105,17 @@ class CookieTokenRefreshView(TokenRefreshView):
         )
         return response
             
+
+class MeView(APIView):
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        return Response({
+            'user': UserSerializer(user).data
+        })           
+
 class LogoutView(APIView):
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
