@@ -1,8 +1,15 @@
 from django.db import models
 
+from auth_app.api.authentication import User
+
 
 class Disease(models.Model):
     disease_id = models.CharField(max_length=50, unique=True)
+    owner = models.ForeignKey(
+        User,
+        related_name='diseases',
+        on_delete=models.CASCADE
+    )
     name = models.CharField(max_length=255)
     image = models.URLField()
     category = models.CharField(max_length=255)

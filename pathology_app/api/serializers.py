@@ -159,14 +159,12 @@ class DiseaseSerializer(serializers.ModelSerializer):
         durst_serializer = DurstDataSerializer(data=durst_data)
         durst_serializer.is_valid(raise_exception=True)
         durst_serializer.save(disease=disease)
-
-        for q in quiz_data:
-            options = q.pop("options")
-            question = Quiz.objects.create(disease=disease, **q)
-
-
-        # Create Sources
-        for s in sources_data:
-            Source.objects.create(disease=disease, **s)
-
+        for quiz in quiz_data:
+            quiz_serializer = QuizSerializer(data=quiz)
+            quiz_serializer.is_valid(raise_exception=True)
+            quiz_serializer.save(disease=disease)
+        for source in sources_data:
+            source_serializer = SourceSerializer(data=source)
+            source_serializer.is_valid(raise_exception=True)
+            source_serializer.save(disease=disease)
         return disease
