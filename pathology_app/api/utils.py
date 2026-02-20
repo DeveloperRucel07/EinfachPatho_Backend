@@ -162,12 +162,12 @@ def check_content_formatting(disease_content):
 
 def find_disease_by_prompt(prompt):
     response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-2.5-flash",
     config=types.GenerateContentConfig(system_instruction="du bist ein hochspezialisierter Experte fur deutsche Medizin und Notfall medizin. finde heraus welche Krankheit am besten zu der angebene Text passt.:"),
     contents=prompt,
     )
     
-    disease_name = response.contents[0].output.text.strip()
+    disease_name = response.text.strip()
     return disease_name
 
 def create_disease_image_with_nanobanana(disease_name):
@@ -176,28 +176,94 @@ def create_disease_image_with_nanobanana(disease_name):
         model="gemini-2.5-flash-image",
         contents=prompt_image,
     )
-    for part in response.parts:
-        if part.text is not None:
-            print(part.text)
-        elif part.inline_data is not None:
-            image = part.as_image()
-            image.save(f"{disease_name}.png")
-    return f"{disease_name}.png"
+    for candidate in response.candidates:
+        for part in candidate.content.parts:
+            if part.inline_data:
+                image = part.as_image()
+                image_path = f"{disease_name}.png"
+                image.save(image_path)
+                return image_path
+
+    return None
 
 def create_disease_json_for_durst(disease_name):
     response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-2.5-flash",
     config=types.GenerateContentConfig(system_instruction=prompt_json),
     contents=disease_name,
     )
-    disease_json = response.contents[0].output.text.strip()
-    return check_content_formatting(disease_json)
+    disease_json = response.text.strip()
+    disease = check_content_formatting(disease_json)
+    return disease
 
-def create_disease_json_for_durst_with_image(disease_name):
-    image_url = create_disease_image_with_nanobanana(disease_name)
-    disease_json = create_disease_json_for_durst(disease_name)
-    disease_json['image'] = image_url
-    return disease_json
+
+def transform_ai_json(ai_json):
+    durst = ai_json.get("durst_data", {})
+
+    durst_data =  {
+        "disease_id": ai_json.get("disease_id"),
+        "name": ai_json.get("name"),
+        "image": ai_json.get("image"),
+        "category": ai_json.get("category"),
+
+        "durst_data": {
+            "definition": durst.get("definition"),
+
+            "ursachen_text": durst.get("ursachen", {}).get("text"),
+            "ursache_keywords": durst.get("ursachen", {}).get("keywords", []),
+
+            "risk_factors": durst.get("risikofaktoren", []),
+
+            "symptoms": durst.get("symptome", {}).get("list", []),
+            "red_flags": durst.get("symptome", {}).get("red_flags"),
+
+            "immediate_actions": durst.get("therapie_massnahmen", {}).get("immediate_actions", []),
+            "diagnostic_gold_standard": durst.get("therapie_massnahmen", {}).get("diagnostic_gold_standard"),
+            "guideline_link": durst.get("therapie_massnahmen", {}).get("guideline_link"),
+        }
+    }
+    return durst_data
+
+def transform_quiz(ai_json, disease_instance):
+
+    quiz_data = {
+        "title": f"Quiz for {ai_json.get('name')}",
+        "disease": disease_instance.id,
+        "questions": [
+            {
+                "question_title": q.get("question"),
+                "question_options": q.get("options"),
+                "correct_index": q.get("correct_index"),
+                "explanation": q.get("explanation"),
+            }
+            for q in ai_json.get("quiz", [])
+        ]
+    }
+
+    return quiz_data
+
+
+def save_disease_json_in_database(disease_json, owner=None):
+    """Persist a disease document returned by the AI.
+
+    The function delegates to :class:`DiseaseCreateSerializer` so that the
+    complete nested structure is handled in one shot.  ``owner`` may be passed in
+    (usually the request user); if omitted the serializer will raise when it
+    tries to access ``self.context['request']``.
+
+    The older transform logic remains available but is no longer used.
+    """
+    from pathology_app.api.serializers import DiseaseCreateSerializer
+
+    # the JSON coming from the model is already expected to match the create
+    # serializer's structure, so we can forward it directly.
+    context = {} if owner is None else {'request': type('O', (), {'user': owner})}
+    serializer = DiseaseCreateSerializer(data=disease_json, context=context)
+    if serializer.is_valid():
+        return serializer.save()
+    else:
+        raise ValueError(f"Invalid disease data: {serializer.errors}")
+
 
 
 

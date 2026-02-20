@@ -1,170 +1,254 @@
-# serializers.py
 from rest_framework import serializers
-from pathology_app.models import Disease, Quiz, Question, Source, DurstData, RiskFactor, Symptom, ImmediateAction, UrsacheKeyword
-
-
-
-
-
-class QuestionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Question
-        fields = [
-            "id",
-            "question_title",
-            "question_options",
-            "correct_index",
-            "explanation",
-            "quiz",
-            "created_at",
-            "updated_at",
-        ]
-
-    def validate(self, data):
-        options = data.get("question_options")
-
-        if not isinstance(options, list):
-            raise serializers.ValidationError(
-                "question_options must be a list."
-            )
-
-        if len(options) < 2:
-            raise serializers.ValidationError(
-                "At least 2 options are required."
-            )
-
-        if data["correct_index"] >= len(options):
-            raise serializers.ValidationError(
-                "correct_index is out of range."
-            )
-
-        if data["correct_index"] < 0:
-            raise serializers.ValidationError(
-                "correct_index cannot be negative."
-            )
-
-        return data
-
-class QuizSerializer(serializers.ModelSerializer):
-    questions = QuestionSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Quiz
-        fields = [
-            "id",
-            "title",
-            "disease",
-            "questions",
-            "created_at",
-            "updated_at",
-        ]
-
-
-class SourceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Source
-        fields = ["id", "source_name", "link"]
-
-
-class RiskFactorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = RiskFactor
-        fields = ["id", "text"]
-
-
-class SymptomSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Symptom
-        fields = ["id", "text"]
-
-
-class ImmediateActionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ImmediateAction
-        fields = ["id", "text"]
+from pathology_app.models import (
+    Disease,
+    DurstData,
+    UrsacheKeyword,
+    RiskFactor,
+    Symptom,
+    ImmediateAction,
+    Quiz,
+    Question,
+    Source
+)
 
 
 class UrsacheKeywordSerializer(serializers.ModelSerializer):
+    """
+    Serializer for UrsacheKeyword model.
+    Handles the keywords related to the causes (Ursachen) of a disease.
+    """
     class Meta:
         model = UrsacheKeyword
-        fields = ["id", "keyword"]
+        fields = ['id', 'keyword']
+        read_only_fields = ['id']
+
+
+class RiskFactorSerializer(serializers.ModelSerializer):
+    """
+    Serializer for RiskFactor model.
+    Handles the risk factors of a disease.
+    """
+    class Meta:
+        model = RiskFactor
+        fields = ['id', 'text']
+        read_only_fields = ['id']
+
+
+class SymptomSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Symptom model.
+    Handles the symptoms of a disease.
+    """
+    class Meta:
+        model = Symptom
+        fields = ['id', 'text']
+        read_only_fields = ['id']
+
+
+class ImmediateActionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for ImmediateAction model.
+    Handles the immediate therapy actions for a disease.
+    """
+    class Meta:
+        model = ImmediateAction
+        fields = ['id', 'text']
+        read_only_fields = ['id']
+
+
+class QuestionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Question model.
+    Handles quiz questions with options, correct answer index, and explanation.
+
+    Includes validation to ensure the correct_index references an existing entry in
+    the options list and that a question string is provided.
+    """
+    class Meta:
+        model = Question
+        fields = ['id', 'question', 'options', 'correct_index', 'explanation', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        options = attrs.get('options', [])
+        correct = attrs.get('correct_index', 0)
+        if not options or not isinstance(options, (list, tuple)):
+            raise serializers.ValidationError("Options must be a non-empty list.")
+        if correct < 0 or correct >= len(options):
+            raise serializers.ValidationError("correct_index must be a valid index into options.")
+        if not attrs.get('question'):
+            raise serializers.ValidationError("Question text cannot be empty.")
+        return attrs
+
+
+class SourceSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Source model.
+    Handles the sources/references for a disease.
+    """
+    class Meta:
+        model = Source
+        fields = ['id', 'source_name', 'link']
+        read_only_fields = ['id']
+
+
+class QuizSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Quiz model.
+    Includes nested questions for the quiz.
+    """
+    questions = QuestionSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Quiz
+        fields = ['id', 'title', 'questions', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class DurstDataSerializer(serializers.ModelSerializer):
-    risk_factors = RiskFactorSerializer(many=True)
-    symptoms = SymptomSerializer(many=True)
-    immediate_actions = ImmediateActionSerializer(many=True)
-    ursache_keywords = UrsacheKeywordSerializer(many=True)
-
+    """
+    Serializer for DurstData model.
+    Includes nested related objects: ursache_keywords, risk_factors, symptoms, immediate_actions.
+    """
+    ursache_keywords = UrsacheKeywordSerializer(many=True, read_only=True)
+    risk_factors = RiskFactorSerializer(many=True, read_only=True)
+    symptoms = SymptomSerializer(many=True, read_only=True)
+    immediate_actions = ImmediateActionSerializer(many=True, read_only=True)
+    
     class Meta:
         model = DurstData
         fields = [
-            "definition",
-            "ursachen_text",
-            "red_flags",
-            "diagnostic_gold_standard",
-            "guideline_link",
-            "risk_factors",
-            "symptoms",
-            "immediate_actions",
-            "ursache_keywords",
+            'id',
+            'definition',
+            'ursachen',
+            'ursache_keywords',
+            'risk_factors',
+            'symptoms',
+            'red_flags',
+            'immediate_actions',
+            'diagnostic_gold_standard',
+            'guideline_link'
         ]
-
-    def create(self, validated_data):
-        risk_data = validated_data.pop("risk_factors")
-        symptom_data = validated_data.pop("symptoms")
-        action_data = validated_data.pop("immediate_actions")
-        keyword_data = validated_data.pop("ursache_keywords")
-
-        durst = DurstData.objects.create(**validated_data)
-
-        for r in risk_data:
-            RiskFactor.objects.create(durst_data=durst, **r)
-
-        for s in symptom_data:
-            Symptom.objects.create(durst_data=durst, **s)
-
-        for a in action_data:
-            ImmediateAction.objects.create(durst_data=durst, **a)
-
-        for k in keyword_data:
-            UrsacheKeyword.objects.create(durst_data=durst, **k)
-
-        return durst
+        read_only_fields = ['id']
 
 
 class DiseaseSerializer(serializers.ModelSerializer):
-    durst_data = DurstDataSerializer()
-    quiz = QuizSerializer(many=True)
-    sources = SourceSerializer(many=True)
-
+    """
+    Serializer for Disease model.
+    The main serializer that includes all related data:
+    - durst_data (D-U-R-S-T data)
+    - quizzes (with nested questions)
+    - sources
+    """
+    durst_data = DurstDataSerializer(read_only=True)
+    quizzes = QuizSerializer(many=True, read_only=True)
+    sources = SourceSerializer(many=True, read_only=True)
+    
     class Meta:
         model = Disease
         fields = [
-            "id",
-            "disease_id",
-            "name",
-            "image",
-            "category",
-            "durst_data",
-            "quiz_questions",
-            "sources",
+            'id',
+            'disease_id',
+            'name',
+            'image',
+            'category',
+            'durst_data',
+            'quizzes',
+            'sources',
+            'created_at',
+            'updated_at'
         ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
+
+class DiseaseCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating a Disease with all related data.
+    Used for the generate_disease endpoint to create disease from JSON.
+    """
+    durst_data = serializers.DictField(required=False)
+    quizzes = serializers.ListField(required=False, child=serializers.DictField())
+    sources = serializers.ListField(required=False, child=serializers.DictField())
+    
+    class Meta:
+        model = Disease
+        fields = [
+            'disease_id',
+            'name',
+            'image',
+            'category',
+            'durst_data',
+            'quizzes',
+            'sources'
+        ]
+    
     def create(self, validated_data):
-        durst_data = validated_data.pop("durst_data")
-        quiz_data = validated_data.pop("quiz_questions")
-        sources_data = validated_data.pop("sources")
-        disease = Disease.objects.create(**validated_data)
-        durst_serializer = DurstDataSerializer(data=durst_data)
-        durst_serializer.is_valid(raise_exception=True)
-        durst_serializer.save(disease=disease)
-        for quiz in quiz_data:
-            quiz_serializer = QuizSerializer(data=quiz)
-            quiz_serializer.is_valid(raise_exception=True)
-            quiz_serializer.save(disease=disease)
-        for source in sources_data:
-            source_serializer = SourceSerializer(data=source)
-            source_serializer.is_valid(raise_exception=True)
-            source_serializer.save(disease=disease)
+        """
+        Create a Disease with all related objects from the JSON data.
+        """
+        # Extract related data
+        durst_data = validated_data.pop('durst_data', {})
+        quizzes_data = validated_data.pop('quizzes', [])
+        sources_data = validated_data.pop('sources', [])
+        
+        # Get the owner from the request context
+        owner = self.context['request'].user
+        
+        # Create the Disease
+        disease = Disease.objects.create(owner=owner, **validated_data)
+        
+        # Create DurstData
+        if durst_data:
+            ursachen_block = durst_data.get('ursachen', {})
+            ursachen_keywords = ursachen_block.get('keywords', [])
+            ursachen_text = ursachen_block.get('text', '')
+            
+            durst_data_obj = DurstData.objects.create(
+                disease=disease,
+                definition=durst_data.get('definition', ''),
+                ursachen=ursachen_text,
+                red_flags=durst_data.get('symptoms', {}).get('red_flags', ''),
+                diagnostic_gold_standard=durst_data.get('therapie_massnahmen', {}).get('diagnostic_gold_standard', ''),
+                guideline_link=durst_data.get('therapie_massnahmen', {}).get('guideline_link', '')
+            )
+            
+            # Create UrsacheKeywords
+            for keyword in ursachen_keywords:
+                UrsacheKeyword.objects.create(durst_data=durst_data_obj, keyword=keyword)
+            
+            # Create RiskFactors
+            for risk_factor in durst_data.get('risikofaktoren', []):
+                RiskFactor.objects.create(durst_data=durst_data_obj, text=risk_factor)
+            
+            # Create Symptoms
+            for symptom in durst_data.get('symptoms', {}).get('list', []):
+                Symptom.objects.create(durst_data=durst_data_obj, text=symptom)
+            
+            # Create ImmediateActions
+            for action in durst_data.get('therapie_massnahmen', {}).get('immediate_actions', []):
+                ImmediateAction.objects.create(durst_data=durst_data_obj, text=action)
+        
+        # Create Quizzes and Questions
+        for quiz_data in quizzes_data:
+            quiz = Quiz.objects.create(disease=disease, title=f"Quiz für {disease.name}")
+            
+            # JSON coming from generator uses keys 'question' and 'options'.
+            if isinstance(quiz_data, dict):
+                Question.objects.create(
+                    quiz=quiz,
+                    question=quiz_data.get('question', ''),
+                    options=quiz_data.get('options', []),)
+                # Legacy format handling if needed
+                pass
+        
+        # Create Sources
+        for source_data in sources_data:
+            if isinstance(source_data, dict):
+                Source.objects.create(
+                    disease=disease,
+                    source_name=source_data.get('source_name', ''),
+                    link=source_data.get('link', '')
+                )
+        
         return disease
+
