@@ -33,7 +33,7 @@ class DiseaseDetailView(generics.RetrieveAPIView):
     serializer_class = DiseaseSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     authentication_classes = [CookieJWTAuthentication]
-    lookup_field = 'pk'
+    lookup_field = "disease_id"
 
 
 class GenerateDiseaseView(APIView):
