@@ -194,6 +194,7 @@ def create_disease_json_for_durst(disease_name):
     )
     disease_json = response.text.strip()
     disease = check_content_formatting(disease_json)
+    print(disease)
     return disease
 
 
@@ -225,14 +226,13 @@ def transform_ai_json(ai_json):
     return durst_data
 
 def transform_quiz(ai_json, disease_instance):
-
     quiz_data = {
         "title": f"Quiz for {ai_json.get('name')}",
         "disease": disease_instance.id,
         "questions": [
             {
-                "question_title": q.get("question"),
-                "question_options": q.get("options"),
+                "question": q.get("question"),
+                "options": q.get("options"),
                 "correct_index": q.get("correct_index"),
                 "explanation": q.get("explanation"),
             }

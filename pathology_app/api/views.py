@@ -1,3 +1,4 @@
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -18,10 +19,12 @@ class DiseaseListView(generics.ListAPIView):
     API endpoint to list all diseases.
     Accessible by any user (read-only).
     """
-    queryset = Disease.objects.all()
+    queryset = Disease.objects.all().order_by('-created_at')
     serializer_class = DiseaseSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     authentication_classes = [CookieJWTAuthentication]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = {'created_at': ['exact', 'gte', 'lte']}
 
 
 class DiseaseDetailView(generics.RetrieveAPIView):

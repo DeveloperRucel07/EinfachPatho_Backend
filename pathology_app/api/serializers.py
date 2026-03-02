@@ -167,7 +167,7 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
     Used for the generate_disease endpoint to create disease from JSON.
     """
     durst_data = serializers.DictField(required=False)
-    quizzes = serializers.ListField(required=False, child=serializers.DictField())
+    quiz = serializers.ListField(required=False, child=serializers.DictField())
     sources = serializers.ListField(required=False, child=serializers.DictField())
     
     class Meta:
@@ -178,7 +178,7 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
             'image',
             'category',
             'durst_data',
-            'quizzes',
+            'quiz',
             'sources'
         ]
     
@@ -188,7 +188,7 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
         """
         # Extract related data
         durst_data = validated_data.pop('durst_data', {})
-        quizzes_data = validated_data.pop('quizzes', [])
+        quizzes_data = validated_data.pop('quiz', [])
         sources_data = validated_data.pop('sources', [])
         
         # Get the owner from the request context
@@ -207,7 +207,7 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
                 disease=disease,
                 definition=durst_data.get('definition', ''),
                 ursachen=ursachen_text,
-                red_flags=durst_data.get('symptoms', {}).get('red_flags', ''),
+                red_flags=durst_data.get('symptome', {}).get('red_flags', ''),
                 diagnostic_gold_standard=durst_data.get('therapie_massnahmen', {}).get('diagnostic_gold_standard', ''),
                 guideline_link=durst_data.get('therapie_massnahmen', {}).get('guideline_link', '')
             )
@@ -221,7 +221,9 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
                 RiskFactor.objects.create(durst_data=durst_data_obj, text=risk_factor)
             
             # Create Symptoms
-            for symptom in durst_data.get('symptoms', {}).get('list', []):
+            # Corrected Symptoms loop
+            symptom_list = durst_data.get('symptome', {}).get('list', [])
+            for symptom in symptom_list:
                 Symptom.objects.create(durst_data=durst_data_obj, text=symptom)
             
             # Create ImmediateActions
@@ -229,18 +231,24 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
                 ImmediateAction.objects.create(durst_data=durst_data_obj, text=action)
         
         # Create Quizzes and Questions
-        for quiz_data in quizzes_data:
+        if quizzes_data:
             quiz = Quiz.objects.create(disease=disease, title=f"Quiz für {disease.name}")
-            
-            # JSON coming from generator uses keys 'question' and 'options'.
-            if isinstance(quiz_data, dict):
-                Question.objects.create(
-                    quiz=quiz,
-                    question=quiz_data.get('question', ''),
-                    options=quiz_data.get('options', []),)
-                # Legacy format handling if needed
-                pass
-        
+
+            questions_to_create = []
+            for question_data in quizzes_data:
+                if isinstance(question_data, dict):
+                    questions_to_create.append(
+                        Question(
+                            quiz=quiz,
+                            question=question_data.get('question', ''),
+                            options=question_data.get('options', []),
+                            correct_index=question_data.get('correct_index', 0),
+                            explanation=question_data.get('explanation', '')
+                        )
+                    )
+            if questions_to_create:
+                Question.objects.bulk_create(questions_to_create)
+                
         # Create Sources
         for source_data in sources_data:
             if isinstance(source_data, dict):
