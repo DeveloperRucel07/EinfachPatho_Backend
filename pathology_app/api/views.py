@@ -21,7 +21,7 @@ class DiseaseListView(generics.ListAPIView):
     """
     queryset = Disease.objects.all().order_by('-created_at')
     serializer_class = DiseaseSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAdminOrOwner]
     authentication_classes = [CookieJWTAuthentication]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = {'created_at': ['exact', 'gte', 'lte']}
@@ -34,7 +34,7 @@ class DiseaseDetailView(generics.RetrieveAPIView):
     """
     queryset = Disease.objects.all()
     serializer_class = DiseaseSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAdminOrOwner]
     authentication_classes = [CookieJWTAuthentication]
     lookup_field = "disease_id"
 

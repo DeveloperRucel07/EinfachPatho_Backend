@@ -194,7 +194,6 @@ def create_disease_json_for_durst(disease_name):
     )
     disease_json = response.text.strip()
     disease = check_content_formatting(disease_json)
-    print(disease)
     return disease
 
 

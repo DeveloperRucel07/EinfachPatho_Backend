@@ -188,7 +188,7 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
         """
         # Extract related data
         durst_data = validated_data.pop('durst_data', {})
-        quizzes_data = validated_data.pop('quiz', [])
+        quizzes_data = validated_data.pop('quiz', {})
         sources_data = validated_data.pop('sources', [])
         
         # Get the owner from the request context
