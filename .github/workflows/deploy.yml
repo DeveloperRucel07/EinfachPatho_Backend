@@ -41,11 +41,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /opt/einfachpatho
-            # Login für den Docker-Daemon auf dem VPS
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            # Neues Image ziehen
             docker compose pull backend
-            # Container ohne Downtime für andere Services aktualisieren
             docker compose up -d --no-deps backend
-            # Altes Image löschen, um Platz zu sparen
             docker image prune -f
