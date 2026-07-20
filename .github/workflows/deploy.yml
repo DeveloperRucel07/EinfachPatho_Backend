@@ -42,6 +42,6 @@ jobs:
           script: |
             cd /opt/einfachpatho
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose pull backend
-            docker compose up -d --no-deps backend
+            docker-compose pull backend
+            docker-compose up -d --no-deps backend
             docker image prune -f
