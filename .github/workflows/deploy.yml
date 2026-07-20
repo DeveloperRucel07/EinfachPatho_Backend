@@ -27,7 +27,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/einfachpatho-backend:latest
+          tags: ghcr.io/${{ format('{0}', github.repository_owner) }}/einfachpatho-backend:latest
 
   deploy:
     needs: build-and-push
