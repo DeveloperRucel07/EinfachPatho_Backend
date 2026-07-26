@@ -42,7 +42,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
     "http://localhost:5500",
     "http://localhost:4200",
-    "http://localhost:8000"
+    "http://localhost:8000",
     "http://localhost",
     "http://backend",
     "http://einfachpatho.rucel-tsafack.de",
@@ -54,8 +54,6 @@ CSRF_TRUSTED_ORIGINS = [
     "https://rucel-tsafack.de",
 ]
 
-CORS_ALLOW_CREDENTIALS = True
-
 CORS_ALLOW_HEADERS = [
     "authorization",
     "content-type",
@@ -63,6 +61,10 @@ CORS_ALLOW_HEADERS = [
 ]
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+CORS_ALLOW_CREDENTIALS = True
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -182,4 +184,3 @@ SIMPLE_JWT = {
     "AUTH_COOKIE_HTTP_ONLY": True,
     "AUTH_COOKIE_SAMESITE": "Lax",
 }
-
