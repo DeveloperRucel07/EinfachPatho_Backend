@@ -35,16 +35,34 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     'localhost',
     'backend',
-    
+    'einfachpatho.rucel-tsafack.de',
 ]
 
-CORS_ALLOWED_ORIGINS = [
+CORS_ALLOWED_ORIGINS = [   
+    "http://127.0.0.1:5500",
+    "http://localhost:5500",
+    "http://localhost:4200",
+    "http://localhost:8000"
     "http://localhost",
-    "http://backend"
+    "http://backend",
+    "http://einfachpatho.rucel-tsafack.de",
+    "https://einfachpatho.rucel-tsafack.de"
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://rucel-tsafack.de",
+    "https://rucel-tsafack.de",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_HEADERS = [
+    "authorization",
+    "content-type",
+    "x-csrftoken",
 ]
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-# Application definition
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -165,18 +183,3 @@ SIMPLE_JWT = {
     "AUTH_COOKIE_SAMESITE": "Lax",
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True
-
-CORS_ALLOWED_ORIGINS = [
-    "http://127.0.0.1:5500",
-    "http://localhost:5500",
-    "http://localhost:4200",
-    "http://localhost:8000"
-]
-
-CORS_ALLOW_HEADERS = [
-    "authorization",
-    "content-type",
-    "x-csrftoken",
-]

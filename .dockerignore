@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-*.pyo
+*.pyo   
 *.pyd
 .venv/
 venv/
@@ -12,3 +12,7 @@ db.sqlite3
 media/
 staticfiles/
 core/static/
+*.py[cod]
+*$py.class
+.gitignore
+.idea
