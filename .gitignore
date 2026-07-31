@@ -37,3 +37,4 @@ auth_app/migrations/*.py
 .DS_Store
 Thumbs.db
 TODO.md
+einfach_feature.md

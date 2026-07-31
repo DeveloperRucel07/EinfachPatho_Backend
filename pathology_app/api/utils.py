@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from django.conf import settings
 from google import genai
@@ -187,15 +188,20 @@ def create_disease_image_with_nanobanana(disease_name):
     return None
 
 def create_disease_json_for_durst(disease_name):
-    response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
-    config=types.GenerateContentConfig(system_instruction=prompt_json),
-    contents=disease_name,
-    )
-    disease_json = response.text.strip()
-    disease = check_content_formatting(disease_json)
-    return disease
-
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+        config=types.GenerateContentConfig(system_instruction=prompt_json),
+        contents=disease_name,
+        )
+        disease_json = response.text.strip()
+        disease = check_content_formatting(disease_json)
+        return disease
+    except Exception as e:
+        logging.error(f"Error generating disease JSON for {disease_name}: {e}")
+        raise
+    finally:
+        pass
 
 def transform_ai_json(ai_json):
     durst = ai_json.get("durst_data", {})
