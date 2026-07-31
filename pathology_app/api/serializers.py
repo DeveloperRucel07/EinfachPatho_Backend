@@ -8,7 +8,9 @@ from pathology_app.models import (
     ImmediateAction,
     Quiz,
     Question,
-    Source
+    Source,
+    QuizAttempt,
+    QuestionAnswer,
 )
 
 
@@ -259,4 +261,39 @@ class DiseaseCreateSerializer(serializers.ModelSerializer):
                 )
         
         return disease
+
+
+class QuestionAnswerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionAnswer
+        fields = [
+            'id',
+            'question',
+            'selected_index',
+            'is_correct',
+            'answered_at',
+        ]
+        read_only_fields = ['id', 'is_correct', 'answered_at']
+
+
+class QuizAttemptSerializer(serializers.ModelSerializer):
+    answers = QuestionAnswerSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = QuizAttempt
+        fields = [
+            'id',
+            'quiz',
+            'started_at',
+            'completed_at',
+            'score',
+            'total',
+            'answers',
+        ]
+        read_only_fields = ['id', 'started_at', 'completed_at', 'score', 'total', 'answers']
+
+
+class AnswerSubmissionSerializer(serializers.Serializer):
+    question_id = serializers.IntegerField()
+    selected_index = serializers.IntegerField()
 

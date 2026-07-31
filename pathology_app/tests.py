@@ -8,7 +8,7 @@ from rest_framework.test import APIClient
 from unittest import mock
 
 from pathology_app.api.utils import create_disease_image_with_nanobanana
-from pathology_app.models import Disease
+from pathology_app.models import Disease, Quiz, Question, QuizAttempt
 
 
 class GenerateDiseasePromptTests(TestCase):
@@ -188,3 +188,85 @@ class ImagePathSafetyTests(TestCase):
         generated_root = os.path.join(temp_media, 'generated')
         self.assertTrue(path.startswith(generated_root))
         self.assertEqual(os.path.commonpath([path, generated_root]), generated_root)
+
+
+class QuizAttemptApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user_one = User.objects.create_user(username='quiz_owner', email='quiz_owner@example.com', password='StrongPassword#2026')
+        self.user_two = User.objects.create_user(username='quiz_other', email='quiz_other@example.com', password='StrongPassword#2026')
+
+        self.disease = Disease.objects.create(
+            disease_id='QUIZ-D-1',
+            owner=self.user_one,
+            name='Quiz Disease',
+            category='Notfallmedizin',
+        )
+        self.quiz = Quiz.objects.create(disease=self.disease, title='Quiz 1')
+        self.question_one = Question.objects.create(
+            quiz=self.quiz,
+            question='Question one',
+            options=['A', 'B', 'C', 'D'],
+            correct_index=1,
+            explanation='Because B',
+        )
+        self.question_two = Question.objects.create(
+            quiz=self.quiz,
+            question='Question two',
+            options=['A', 'B', 'C', 'D'],
+            correct_index=0,
+            explanation='Because A',
+        )
+
+    def test_complete_attempt_persists_score_and_total(self):
+        self.client.force_authenticate(user=self.user_one)
+
+        start = self.client.post(f'/api/quizzes/{self.quiz.id}/attempts/', format='json')
+        self.assertEqual(start.status_code, 201)
+        attempt_id = start.data['id']
+
+        answer_one = self.client.post(
+            f'/api/attempts/{attempt_id}/answer/',
+            {'question_id': self.question_one.id, 'selected_index': 1},
+            format='json',
+        )
+        self.assertEqual(answer_one.status_code, 201)
+        self.assertTrue(answer_one.data['is_correct'])
+
+        answer_two = self.client.post(
+            f'/api/attempts/{attempt_id}/answer/',
+            {'question_id': self.question_two.id, 'selected_index': 3},
+            format='json',
+        )
+        self.assertEqual(answer_two.status_code, 201)
+        self.assertFalse(answer_two.data['is_correct'])
+
+        completed = self.client.post(f'/api/attempts/{attempt_id}/complete/', format='json')
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.data['score'], 1)
+        self.assertEqual(completed.data['total'], 2)
+        self.assertIsNotNone(completed.data['completed_at'])
+
+    def test_attempt_history_is_owner_scoped(self):
+        user_one_attempt = QuizAttempt.objects.create(quiz=self.quiz, user=self.user_one)
+        user_two_attempt = QuizAttempt.objects.create(quiz=self.quiz, user=self.user_two)
+
+        self.client.force_authenticate(user=self.user_one)
+        response = self.client.get(f'/api/attempts/?disease={self.disease.disease_id}')
+
+        self.assertEqual(response.status_code, 200)
+        ids = {item['id'] for item in response.data}
+        self.assertIn(user_one_attempt.id, ids)
+        self.assertNotIn(user_two_attempt.id, ids)
+
+    def test_cross_user_answer_submission_is_forbidden(self):
+        attempt = QuizAttempt.objects.create(quiz=self.quiz, user=self.user_one)
+
+        self.client.force_authenticate(user=self.user_two)
+        response = self.client.post(
+            f'/api/attempts/{attempt.id}/answer/',
+            {'question_id': self.question_one.id, 'selected_index': 1},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 403)

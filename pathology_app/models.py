@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 from auth_app.api.authentication import User
 
@@ -181,4 +182,49 @@ class Source(models.Model):
 
     def __str__(self):
         return self.source_name
+
+
+class QuizAttempt(models.Model):
+    quiz = models.ForeignKey(
+        Quiz,
+        related_name="attempts",
+        on_delete=models.CASCADE,
+    )
+    user = models.ForeignKey(
+        User,
+        related_name="quiz_attempts",
+        on_delete=models.CASCADE,
+    )
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    score = models.PositiveIntegerField(default=0)
+    total = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def complete(self):
+        self.total = self.quiz.questions.count()
+        self.score = self.answers.filter(is_correct=True).count()
+        self.completed_at = timezone.now()
+        self.save(update_fields=["total", "score", "completed_at"])
+
+
+class QuestionAnswer(models.Model):
+    attempt = models.ForeignKey(
+        QuizAttempt,
+        related_name="answers",
+        on_delete=models.CASCADE,
+    )
+    question = models.ForeignKey(
+        Question,
+        on_delete=models.CASCADE,
+    )
+    selected_index = models.IntegerField()
+    is_correct = models.BooleanField()
+    answered_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("attempt", "question")
+        ordering = ["question_id"]
 
