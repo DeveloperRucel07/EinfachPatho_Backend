@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth  import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 User = get_user_model()
 
@@ -51,9 +53,14 @@ class RegistrationSerializer(serializers.ModelSerializer):
         
         if pw != repeated_pw:
             raise serializers.ValidationError({'error':'passwords dont match'})
+
+        try:
+            validate_password(pw)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError({'password': list(e.messages)})
         
         if User.objects.filter(email = self.validated_data['email']).exists():
-            raise serializers.ValidationError({'error':'this Email already exists'})
+            raise serializers.ValidationError({'detail': 'Unable to process registration with the provided credentials.'})
         
         account = User(email = self.validated_data['email'], username = self.validated_data['username'])
         account.set_password(pw)

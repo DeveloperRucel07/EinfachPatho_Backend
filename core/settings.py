@@ -50,8 +50,7 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "http://rucel-tsafack.de",
-    "https://rucel-tsafack.de",
+    "https://einfachpatho.rucel-tsafack.de",
 ]
 
 CORS_ALLOW_HEADERS = [
@@ -76,6 +75,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'auth_app',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'pathology_app'
 ]
@@ -168,11 +168,16 @@ REST_FRAMEWORK = {
         
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+        'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend'
-    ]
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/min',
+        'register': '5/min',
+        'generate_disease': '20/hour',
+    },
 }
 
 
@@ -180,6 +185,8 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_COOKIE": "access_token",
     "AUTH_COOKIE_HTTP_ONLY": True,
     "AUTH_COOKIE_SAMESITE": "Lax",

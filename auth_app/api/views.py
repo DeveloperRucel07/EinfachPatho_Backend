@@ -2,6 +2,9 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from auth_app.api.authentication import CookieJWTAuthentication
@@ -9,6 +12,8 @@ from auth_app.api.serializers import  RegistrationSerializer, CustomTokenObtainP
 
 class RegistrationView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'register'
     def post(self, request):
         '''User registration View
 
@@ -35,6 +40,10 @@ class RegistrationView(APIView):
 
 class CookieTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
+
     def post(self, request, *args, **kwargs):
         '''Override the post method to set the JWT token in an HttpOnly cookie.
         Args:
@@ -72,6 +81,7 @@ class CookieTokenObtainPairView(TokenObtainPairView):
 
 class CookieTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
+
     def post(self, request, *args, **kwargs):
         '''Override the post method to refresh the JWT token from HttpOnly cookie.
 
@@ -87,8 +97,8 @@ class CookieTokenRefreshView(TokenRefreshView):
         serializer = self.get_serializer(data={'refresh': refresh_token})
         try:
             serializer.is_valid(raise_exception=True)
-        except:
-            return Response({'detail': 'Invalid refresh token'}, status=status.HTTP_400_BAD_REQUEST)
+        except TokenError as e:
+            raise InvalidToken(e.args[0])
         
         data = {
             'detail': 'Token refreshed',
@@ -129,9 +139,15 @@ class LogoutView(APIView):
         Returns:
             data, status: return a success message with status 200.
         '''
-        response = Response()
+        refresh_token = request.COOKIES.get('refresh_token')
+        if refresh_token:
+            try:
+                RefreshToken(refresh_token).blacklist()
+            except Exception:
+                pass
+
+        response = Response({'detail': 'Log-Out successfully! All Tokens will be deleted. Refresh token is now invalid.'})
         response.delete_cookie('access_token')
         response.delete_cookie('refresh_token')
-        response.data = {'detail': 'Log-Out successfully! All Tokens will be deleted. Refresh token is now invalid.'}
         response.status_code = status.HTTP_200_OK
         return response           
