@@ -4,7 +4,7 @@ from auth_app.api.authentication import User
 
 
 class Disease(models.Model):
-    disease_id = models.CharField(max_length=50, unique=True, db_index=True)
+    disease_id = models.CharField(max_length=50, db_index=True)
     owner = models.ForeignKey(
         User,
         related_name='diseases',
@@ -18,6 +18,7 @@ class Disease(models.Model):
 
     class Meta:
         ordering = ["name"]
+        unique_together = ("owner", "disease_id")
         indexes = [
             models.Index(fields=["category"]),
         ]

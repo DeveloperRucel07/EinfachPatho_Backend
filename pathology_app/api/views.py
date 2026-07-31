@@ -1,8 +1,11 @@
+import logging
+
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from django.shortcuts import get_object_or_404
 
 from auth_app.api.authentication import CookieJWTAuthentication
@@ -14,17 +17,24 @@ from pathology_app.api.serializers import (
 from pathology_app.api.permissions import IsAdminOrOwner
 
 
+logger = logging.getLogger(__name__)
+
+
 class DiseaseListView(generics.ListAPIView):
     """
     API endpoint to list all diseases.
     Accessible by any user (read-only).
     """
-    queryset = Disease.objects.all().order_by('-created_at')
     serializer_class = DiseaseSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly, IsAdminOrOwner]
+    permission_classes = [IsAuthenticated]
     authentication_classes = [CookieJWTAuthentication]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = {'created_at': ['exact', 'gte', 'lte']}
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = Disease.objects.all() if (user.is_staff or user.is_superuser) else Disease.objects.filter(owner=user)
+        return qs.order_by('-created_at')
 
 
 class DiseaseDetailView(generics.RetrieveAPIView):
@@ -49,6 +59,8 @@ class GenerateDiseaseView(APIView):
     """
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieJWTAuthentication]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'generate_disease'
     
     def post(self, request):
         """
@@ -87,9 +99,10 @@ class GenerateDiseaseView(APIView):
                 disease_name = utils.find_disease_by_prompt(prompt_text)
                 # this will raise if JSON is malformed
                 data = utils.create_disease_json_for_durst(disease_name)
-            except Exception as exc:
+            except Exception:
+                logger.exception("AI generation failed", extra={"user_id": request.user.id})
                 return Response(
-                    {'detail': f'AI generation failed: {exc}'},
+                    {'detail': 'AI generation failed. Please try again later.'},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 

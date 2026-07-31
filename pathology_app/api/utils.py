@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import re
+import uuid
 from django.conf import settings
 from google import genai
 from google.genai import types
@@ -181,7 +183,13 @@ def create_disease_image_with_nanobanana(disease_name):
         for part in candidate.content.parts:
             if part.inline_data:
                 image = part.as_image()
-                image_path = f"{disease_name}.png"
+                safe_name = re.sub(r'[^A-Za-z0-9_-]', '_', disease_name)[:80]
+                image_path = os.path.join(
+                    settings.MEDIA_ROOT,
+                    "generated",
+                    f"{safe_name}-{uuid.uuid4().hex[:8]}.png",
+                )
+                os.makedirs(os.path.dirname(image_path), exist_ok=True)
                 image.save(image_path)
                 return image_path
 
