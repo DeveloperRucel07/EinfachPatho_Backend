@@ -127,7 +127,7 @@ class Quiz(models.Model):
         related_name="quizzes",
         on_delete=models.CASCADE
     )
-    title = models.CharField(max_length=255)
+    title = models.CharField(max_length=255, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -141,7 +141,7 @@ class Quiz(models.Model):
 class Question(models.Model):
     id = models.AutoField(primary_key=True)
 
-    question = models.CharField(max_length=300)
+    question = models.CharField(max_length=300, default="")
     options = models.JSONField(default=list)
     quiz = models.ForeignKey(
         Quiz,
@@ -164,7 +164,7 @@ class Question(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.question_title
+        return self.question
 
 
 class Source(models.Model):
@@ -173,7 +173,7 @@ class Source(models.Model):
         related_name="sources",
         on_delete=models.CASCADE
     )
-    source_name = models.CharField(max_length=255)
+    source_name = models.CharField(max_length=255, default="")
     link = models.URLField()
 
     class Meta:
