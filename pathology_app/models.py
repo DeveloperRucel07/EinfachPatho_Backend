@@ -142,7 +142,7 @@ class Question(models.Model):
     id = models.AutoField(primary_key=True)
 
     question = models.CharField(max_length=300)
-    options = models.JSONField()
+    options = models.JSONField(default=list)
     quiz = models.ForeignKey(
         Quiz,
         related_name="questions",
