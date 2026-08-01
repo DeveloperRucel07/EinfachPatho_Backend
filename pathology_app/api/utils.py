@@ -165,7 +165,7 @@ def check_content_formatting(disease_content):
 
 def find_disease_by_prompt(prompt):
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3-flash-preview",
     config=types.GenerateContentConfig(system_instruction="du bist ein hochspezialisierter Experte fur deutsche Medizin und Notfall medizin. finde heraus welche Krankheit am besten zu der angebene Text passt.:"),
     contents=prompt,
     )
