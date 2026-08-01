@@ -139,7 +139,7 @@ prompt_json ="""
             },
             {
                 "source_name": "I care Pflege - Thieme Verlag",
-                "link": "https://www.thieme.de/de/pflege/i-care-pflege-150352.htm"
+                "link": "https://icare.thieme.de/ebooks/cs_11485596?context=#/ebook_cs_11485596__23626D5D_73D4_4440_9203_15E297B8F361"
             }
         ]
     },
@@ -176,7 +176,7 @@ def find_disease_by_prompt(prompt):
 def create_disease_image_with_nanobanana(disease_name):
     prompt_image = f"generiere ein medizinisches Bild, das die Krankheit {disease_name} repräsentiert. Das Bild soll informativ und didaktisch sein, um die wichtigsten Merkmale der Krankheit zu veranschaulichen. Es sollte klare visuelle Elemente enthalten, die die Symptome, betroffenen Organe oder andere relevante Aspekte der Krankheit darstellen. Das Bild soll in einem Stil gehalten sein, der für medizinische Lehrmaterialien geeignet ist."
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash-image",
+        model="gemini-3.1-flash-image",
         contents=prompt_image,
     )
     for candidate in response.candidates:
@@ -198,7 +198,7 @@ def create_disease_image_with_nanobanana(disease_name):
 def create_disease_json_for_durst(disease_name):
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
         config=types.GenerateContentConfig(system_instruction=prompt_json),
         contents=disease_name,
         )
