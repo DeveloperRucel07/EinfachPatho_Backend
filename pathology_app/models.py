@@ -44,7 +44,7 @@ class DurstData(models.Model):
         on_delete=models.CASCADE
     )
     definition = models.TextField()
-    ursachen = models.TextField(verbose_name="Ursachen")
+    ursachen = models.TextField(verbose_name="Ursachen", default="", help_text="Beschreibung der Ursachen")
     red_flags = models.TextField(blank=True, help_text="Warnsignale, die eine Lungenembolie nahelegen können")
     diagnostic_gold_standard = models.TextField(blank=True)
     guideline_link = models.URLField(blank=True)
