@@ -8,6 +8,7 @@ from rest_framework.test import APIClient
 from unittest import mock
 
 from pathology_app.api.utils import create_disease_image_with_nanobanana
+from pathology_app.api.utils import DiseaseGenerationService
 from pathology_app.models import Disease, Quiz, Question, QuizAttempt
 
 
@@ -20,30 +21,15 @@ class GenerateDiseasePromptTests(TestCase):
         self.user = User.objects.create_user(username='tester', email='tester@example.com', password='pass')
         self.client.force_authenticate(self.user)
 
-    @mock.patch('pathology_app.api.utils.create_disease_json_for_durst')
-    @mock.patch('pathology_app.api.utils.find_disease_by_prompt')
-    def test_prompt_generates_disease(self, mock_find, mock_create_json):
-        # arrange: make the helper return a fixed disease name and JSON
-        mock_find.return_value = 'Test Disease'
-        mock_create_json.return_value = {
-            'disease_id': 'TEST-001',
-            'name': 'Test Disease',
-            'image': 'https://example.com/img.png',
-            'category': 'Testcat',
-            'durst_data': {
-                'definition': 'Definition here',
-                'ursachen': {'text': 'cause', 'keywords': []},
-                'risikofaktoren': [],
-                'symptoms': {'list': [], 'red_flags': ''},
-                'therapie_massnahmen': {
-                    'immediate_actions': [],
-                    'diagnostic_gold_standard': '',
-                    'guideline_link': ''
-                }
-            },
-            'quiz': [],
-            'sources': []
-        }
+    @mock.patch('pathology_app.api.views.DiseaseGenerationService.get_or_generate')
+    def test_prompt_generates_disease(self, mock_get_or_generate):
+        disease = Disease.objects.create(
+            disease_id='TEST-001',
+            owner=self.user,
+            name='Test Disease',
+            category='Testcat',
+        )
+        mock_get_or_generate.return_value = disease
 
         # act
         response = self.client.post('/api/generate_disease/', {'prompt': 'anything'}, format='json')
@@ -52,8 +38,7 @@ class GenerateDiseasePromptTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['disease_id'], 'TEST-001')
         self.assertEqual(response.data['name'], 'Test Disease')
-        mock_find.assert_called_once()
-        mock_create_json.assert_called_once_with('Test Disease')
+        mock_get_or_generate.assert_called_once_with('anything', self.user, prompt_text='anything')
 
 
 class DiseaseListAccessTests(TestCase):
@@ -99,15 +84,41 @@ class GenerateDiseaseFailureTests(TestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    @mock.patch('pathology_app.api.utils.find_disease_by_prompt')
-    def test_generation_error_is_redacted(self, mock_find):
-        mock_find.side_effect = Exception('internal-sdk-error-with-sensitive-data')
+    @mock.patch('pathology_app.api.views.DiseaseGenerationService.get_or_generate')
+    def test_generation_error_is_redacted(self, mock_get_or_generate):
+        mock_get_or_generate.side_effect = Exception('internal-sdk-error-with-sensitive-data')
 
         response = self.client.post('/api/generate_disease/', {'prompt': 'something'}, format='json')
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.data['detail'], 'AI generation failed. Please try again later.')
         self.assertNotIn('internal-sdk-error-with-sensitive-data', response.data['detail'])
+
+
+class DiseaseGenerationReuseTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(username='reuse_user', email='reuse_user@example.com', password='StrongPassword#2026')
+
+    def test_existing_disease_short_circuits_before_provider(self):
+        disease = Disease.objects.create(
+            disease_id='REUSE-001',
+            owner=self.user,
+            name='  ReUsE Disease  ',
+            category='Category',
+        )
+
+        mock_provider = mock.Mock()
+        mock_provider.resolve_disease_name.side_effect = AssertionError('resolve_disease_name should not run')
+        mock_provider.generate_disease_payload.side_effect = AssertionError('generate_disease_payload should not run')
+
+        service = DiseaseGenerationService(provider=mock_provider)
+        result = service.get_or_generate('reuse disease', self.user, prompt_text='reuse disease')
+
+        self.assertEqual(result.id, disease.id)
+        mock_provider.resolve_disease_name.assert_not_called()
+        mock_provider.generate_disease_payload.assert_not_called()
 
 
 class DiseaseIdUniquenessTests(TestCase):

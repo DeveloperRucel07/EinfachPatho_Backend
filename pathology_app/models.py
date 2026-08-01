@@ -28,6 +28,41 @@ class Disease(models.Model):
         return self.name
 
 
+class DiseaseGenerationState(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        GENERATING = "GENERATING", "Generating"
+        READY = "READY", "Ready"
+        FAILED = "FAILED", "Failed"
+
+    normalized_name = models.CharField(max_length=255, unique=True, db_index=True)
+    disease = models.OneToOneField(
+        Disease,
+        related_name="generation_state",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+    original_name = models.CharField(max_length=255)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    generated_at = models.DateTimeField(null=True, blank=True)
+    ai_model = models.CharField(max_length=100, blank=True, default="")
+    generation_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["normalized_name"]
+
+    def __str__(self):
+        return f"{self.original_name} [{self.status}]"
+
+
 class DurstData(models.Model):
     """Extended descriptive data ("DURST") tied to a disease.
 

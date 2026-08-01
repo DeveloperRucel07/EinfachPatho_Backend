@@ -12,10 +12,14 @@ from auth_app.api.authentication import CookieJWTAuthentication
 from pathology_app.models import Disease, Quiz, QuizAttempt, Question, QuestionAnswer
 from pathology_app.api.serializers import (
     DiseaseSerializer,
-    DiseaseCreateSerializer,
     QuizAttemptSerializer,
     QuestionAnswerSerializer,
     AnswerSubmissionSerializer,
+)
+from pathology_app.api.utils import (
+    DiseaseGenerationError,
+    DiseaseGenerationService,
+    GeneratedPayloadValidationError,
 )
 from pathology_app.api.permissions import IsAdminOrOwner
 
@@ -66,31 +70,10 @@ class GenerateDiseaseView(APIView):
     throttle_scope = 'generate_disease'
     
     def post(self, request):
-        """
-        Create a new disease from the supplied data.
-
-        Two modes are supported:
-
-        * **JSON mode** – client sends the full disease document (same format as
-          the `DiseaseCreateSerializer` expects).  This is unchanged from
-          previous behaviour.
-        * **Prompt mode** – client sends a payload containing only the key
-          ``prompt`` with a free‑text description.  The backend will use the
-          Gemini AI helpers to resolve a disease name, generate a DURST JSON
-          blob and then persist it.
-
-        Example prompt request body::
-
-            {"prompt": "tiefe venenthrombose"}
-        """
-
+        service = DiseaseGenerationService()
         data = request.data.copy()
 
-        # handle prompt generation first
         if 'prompt' in data:
-            # avoid circular import at module load time
-            from pathology_app.api import utils
-
             prompt_text = data.get('prompt', '')
             if not prompt_text:
                 return Response(
@@ -99,24 +82,45 @@ class GenerateDiseaseView(APIView):
                 )
 
             try:
-                disease_name = utils.find_disease_by_prompt(prompt_text)
-                # this will raise if JSON is malformed
-                data = utils.create_disease_json_for_durst(disease_name)
-            except Exception:
-                logger.exception("AI generation failed", extra={"user_id": request.user.id})
+                disease = service.get_or_generate(prompt_text, request.user, prompt_text=prompt_text)
+            except DiseaseGenerationError as exc:
+                logger.error("AI generation failed", extra={"user_id": request.user.id, "error": str(exc)})
                 return Response(
                     {'detail': 'AI generation failed. Please try again later.'},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
-
-        serializer = DiseaseCreateSerializer(data=data, context={'request': request})
-        if serializer.is_valid():
-            disease = serializer.save()
+            except Exception as exc:
+                logger.error("Unexpected AI generation failure", extra={"user_id": request.user.id, "error": str(exc)})
+                return Response(
+                    {'detail': 'AI generation failed. Please try again later.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             return Response(
                 DiseaseSerializer(disease).data,
                 status=status.HTTP_201_CREATED
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            disease = service.persist_ai_payload(data, request.user)
+        except GeneratedPayloadValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except DiseaseGenerationError as exc:
+            logger.error("Disease persistence failed", extra={"user_id": request.user.id, "error": str(exc)})
+            return Response(
+                {'detail': 'AI generation failed. Please try again later.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:
+            logger.error("Unexpected disease generation failure", extra={"user_id": request.user.id, "error": str(exc)})
+            return Response(
+                {'detail': 'AI generation failed. Please try again later.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            DiseaseSerializer(disease).data,
+            status=status.HTTP_201_CREATED
+        )
 
 
 class QuizAttemptStartView(APIView):

@@ -1,11 +1,35 @@
 import json
+import hashlib
 import logging
 import os
 import re
 import uuid
+from typing import Optional
+
+from django.core.cache import cache
+from django.core.validators import URLValidator
 from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
+from django.db.models.functions import Lower, Trim
+from django.utils import timezone
 from google import genai
 from google.genai import types
+
+from pathology_app.models import (
+    Disease,
+    DiseaseGenerationState,
+    DurstData,
+    ImmediateAction,
+    Question,
+    Quiz,
+    RiskFactor,
+    Source,
+    Symptom,
+    UrsacheKeyword,
+)
+
+logger = logging.getLogger(__name__)
 
 gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 prompt_json ="""
@@ -149,6 +173,487 @@ prompt_json ="""
     """
 
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+
+def normalize_disease_name(name: Optional[str]) -> str:
+    return (name or "").strip().casefold()
+
+
+def disease_queryset():
+    return (
+        Disease.objects.select_related("durst_data")
+        .prefetch_related(
+            "durst_data__ursache_keywords",
+            "durst_data__risk_factors",
+            "durst_data__symptoms",
+            "durst_data__immediate_actions",
+            "quizzes__questions",
+            "sources",
+        )
+    )
+
+
+def disease_cache_key(normalized_name: str) -> str:
+    digest = hashlib.sha256(normalized_name.encode("utf-8")).hexdigest()
+    return f"disease-generation:{digest}"
+
+
+class DiseaseGenerationError(Exception):
+    pass
+
+
+class GeneratedPayloadValidationError(DiseaseGenerationError):
+    pass
+
+
+class BaseDiseaseProvider:
+    model_name = DEFAULT_GEMINI_MODEL
+
+    def resolve_disease_name(self, prompt_text: str) -> str:
+        raise NotImplementedError
+
+    def generate_disease_payload(self, disease_name: str) -> dict:
+        raise NotImplementedError
+
+
+class GeminiProvider(BaseDiseaseProvider):
+    model_name = DEFAULT_GEMINI_MODEL
+
+    def resolve_disease_name(self, prompt_text: str) -> str:
+        response = gemini_client.models.generate_content(
+            model=self.model_name,
+            config=types.GenerateContentConfig(
+                system_instruction="du bist ein hochspezialisierter Experte fur deutsche Medizin und Notfall medizin. finde heraus welche Krankheit am besten zu der angebene Text passt.:"
+            ),
+            contents=prompt_text,
+        )
+        return response.text.strip()
+
+    def generate_disease_payload(self, disease_name: str) -> dict:
+        response = gemini_client.models.generate_content(
+            model=self.model_name,
+            config=types.GenerateContentConfig(system_instruction=prompt_json),
+            contents=disease_name,
+        )
+        disease_json = response.text.strip()
+        return check_content_formatting(disease_json)
+
+
+class OpenAIProvider(BaseDiseaseProvider):
+    model_name = "openai"
+
+    def resolve_disease_name(self, prompt_text: str) -> str:
+        raise NotImplementedError("OpenAIProvider is a future extension point.")
+
+    def generate_disease_payload(self, disease_name: str) -> dict:
+        raise NotImplementedError("OpenAIProvider is a future extension point.")
+
+
+class LocalLlamaProvider(BaseDiseaseProvider):
+    model_name = "local-llama"
+
+    def resolve_disease_name(self, prompt_text: str) -> str:
+        raise NotImplementedError("LocalLlamaProvider is a future extension point.")
+
+    def generate_disease_payload(self, disease_name: str) -> dict:
+        raise NotImplementedError("LocalLlamaProvider is a future extension point.")
+
+
+class DiseaseGenerationService:
+    def __init__(self, provider=None, cache_backend=None):
+        self.provider = provider or GeminiProvider()
+        self.cache = cache_backend or cache
+        self.url_validator = URLValidator()
+
+    def get_or_generate(self, disease_name, requesting_user, prompt_text=None):
+        requested_name = (disease_name or "").strip()
+
+        cached = self._get_cached_disease(requested_name)
+        if cached is not None:
+            return cached
+
+        existing = self._find_existing_disease(requested_name)
+        if existing is not None:
+            self._cache_disease(existing)
+            return existing
+
+        canonical_name = requested_name
+        if prompt_text:
+            canonical_name = self.provider.resolve_disease_name(prompt_text)
+            existing = self._find_existing_disease(canonical_name)
+            if existing is not None:
+                self._cache_disease(existing)
+                return existing
+
+        if not canonical_name:
+            raise GeneratedPayloadValidationError("Disease name is required.")
+
+        with transaction.atomic():
+            state = self._lock_generation_state(canonical_name)
+            existing = self._find_existing_disease(canonical_name)
+            if existing is not None:
+                self._attach_existing_disease(state, existing)
+                self._cache_disease(existing)
+                return existing
+
+            state.original_name = canonical_name
+            state.status = DiseaseGenerationState.Status.GENERATING
+            state.ai_model = self.provider.model_name
+            state.generation_error = ""
+            state.save(update_fields=["original_name", "status", "ai_model", "generation_error", "updated_at"])
+
+            try:
+                ai_payload = self.provider.generate_disease_payload(canonical_name)
+                self._validate_generated_payload(ai_payload)
+                disease = self._store_validated_payload(ai_payload, requesting_user)
+            except Exception as exc:
+                state.status = DiseaseGenerationState.Status.FAILED
+                state.ai_model = self.provider.model_name
+                state.generation_error = str(exc)
+                state.save(update_fields=["status", "ai_model", "generation_error", "updated_at"])
+                logger.exception("Disease generation failed", extra={"disease_name": canonical_name, "user_id": getattr(requesting_user, "id", None)})
+                raise
+
+            self._attach_ready_disease(state, disease)
+            self._cache_disease(disease)
+            return disease
+
+    def persist_ai_payload(self, ai_payload, requesting_user, ai_model=None):
+        self._validate_generated_payload(ai_payload)
+        disease_name = ai_payload.get("name", "")
+
+        cached = self._get_cached_disease(disease_name)
+        if cached is not None:
+            return cached
+
+        existing = self._find_existing_disease(disease_name)
+        if existing is not None:
+            self._cache_disease(existing)
+            return existing
+
+        ai_model = ai_model or self.provider.model_name
+
+        with transaction.atomic():
+            state = self._lock_generation_state(disease_name)
+            existing = self._find_existing_disease(disease_name)
+            if existing is not None:
+                self._attach_existing_disease(state, existing)
+                self._cache_disease(existing)
+                return existing
+
+            state.original_name = disease_name
+            state.status = DiseaseGenerationState.Status.GENERATING
+            state.ai_model = ai_model
+            state.generation_error = ""
+            state.save(update_fields=["original_name", "status", "ai_model", "generation_error", "updated_at"])
+
+            try:
+                disease = self._store_validated_payload(ai_payload, requesting_user)
+            except Exception as exc:
+                state.status = DiseaseGenerationState.Status.FAILED
+                state.ai_model = ai_model
+                state.generation_error = str(exc)
+                state.save(update_fields=["status", "ai_model", "generation_error", "updated_at"])
+                logger.exception("Disease persistence failed", extra={"disease_name": disease_name, "user_id": getattr(requesting_user, "id", None)})
+                raise
+
+            self._attach_ready_disease(state, disease)
+            self._cache_disease(disease)
+            return disease
+
+    def _get_cached_disease(self, disease_name):
+        normalized_name = normalize_disease_name(disease_name)
+        if not normalized_name:
+            return None
+
+        cache_value = self.cache.get(disease_cache_key(normalized_name))
+        if cache_value is None:
+            return None
+
+        return self._fetch_disease_by_id(cache_value)
+
+    def _cache_disease(self, disease):
+        normalized_name = normalize_disease_name(disease.name)
+        if normalized_name:
+            self.cache.set(disease_cache_key(normalized_name), disease.id, timeout=None)
+
+    def _fetch_disease_by_id(self, disease_id):
+        return disease_queryset().filter(id=disease_id).first()
+
+    def _find_existing_disease(self, disease_name):
+        normalized_name = normalize_disease_name(disease_name)
+        if not normalized_name:
+            return None
+
+        return (
+            disease_queryset()
+            .annotate(normalized_name_db=Lower(Trim("name")))
+            .filter(normalized_name_db=normalized_name)
+            .first()
+        )
+
+    def _lock_generation_state(self, disease_name):
+        normalized_name = normalize_disease_name(disease_name)
+        try:
+            state, _ = DiseaseGenerationState.objects.select_for_update().get_or_create(
+                normalized_name=normalized_name,
+                defaults={
+                    "original_name": disease_name.strip(),
+                    "status": DiseaseGenerationState.Status.PENDING,
+                },
+            )
+        except IntegrityError:
+            state = DiseaseGenerationState.objects.select_for_update().get(normalized_name=normalized_name)
+
+        return state
+
+    def _attach_existing_disease(self, state, disease):
+        state.disease = disease
+        state.original_name = disease.name
+        state.status = DiseaseGenerationState.Status.READY
+        state.generated_at = disease.created_at
+        if not state.ai_model:
+            state.ai_model = self.provider.model_name
+        state.generation_error = ""
+        state.save(
+            update_fields=[
+                "disease",
+                "original_name",
+                "status",
+                "generated_at",
+                "ai_model",
+                "generation_error",
+                "updated_at",
+            ]
+        )
+
+    def _attach_ready_disease(self, state, disease):
+        state.disease = disease
+        state.original_name = disease.name
+        state.status = DiseaseGenerationState.Status.READY
+        state.generated_at = timezone.now()
+        state.ai_model = self.provider.model_name
+        state.generation_error = ""
+        state.save(
+            update_fields=[
+                "disease",
+                "original_name",
+                "status",
+                "generated_at",
+                "ai_model",
+                "generation_error",
+                "updated_at",
+            ]
+        )
+
+    def _validate_generated_payload(self, ai_payload):
+        if not isinstance(ai_payload, dict):
+            raise GeneratedPayloadValidationError("Gemini output must be a JSON object.")
+
+        required_fields = ["disease_id", "name", "image", "category", "durst_data", "quiz", "sources"]
+        missing_fields = [field for field in required_fields if field not in ai_payload]
+        if missing_fields:
+            raise GeneratedPayloadValidationError(f"Missing required fields: {', '.join(missing_fields)}")
+
+        for field_name in ["disease_id", "name", "image", "category"]:
+            value = ai_payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise GeneratedPayloadValidationError(f"Field '{field_name}' must be a non-empty string.")
+
+        self._validate_url(ai_payload.get("image"), "image")
+
+        durst_data = ai_payload.get("durst_data")
+        if not isinstance(durst_data, dict):
+            raise GeneratedPayloadValidationError("Field 'durst_data' must be an object.")
+
+        self._validate_durst_data(durst_data)
+
+        quiz_items = ai_payload.get("quiz")
+        if not isinstance(quiz_items, list) or len(quiz_items) != 5:
+            raise GeneratedPayloadValidationError("Field 'quiz' must contain exactly 5 questions.")
+        self._validate_quiz_items(quiz_items)
+
+        sources = ai_payload.get("sources")
+        if not isinstance(sources, list):
+            raise GeneratedPayloadValidationError("Field 'sources' must be a list.")
+        self._validate_sources(sources)
+
+    def _validate_durst_data(self, durst_data):
+        required = ["definition", "ursachen", "risikofaktoren", "symptome", "therapie_massnahmen"]
+        missing = [field for field in required if field not in durst_data]
+        if missing:
+            raise GeneratedPayloadValidationError(f"Missing DURST fields: {', '.join(missing)}")
+
+        definition = durst_data.get("definition")
+        if not isinstance(definition, str) or not definition.strip():
+            raise GeneratedPayloadValidationError("durst_data.definition must be a non-empty string.")
+
+        ursachen = durst_data.get("ursachen")
+        if not isinstance(ursachen, dict):
+            raise GeneratedPayloadValidationError("durst_data.ursachen must be an object.")
+        if not isinstance(ursachen.get("text"), str) or not ursachen.get("text", "").strip():
+            raise GeneratedPayloadValidationError("durst_data.ursachen.text must be a non-empty string.")
+        keywords = ursachen.get("keywords")
+        if not isinstance(keywords, list) or any(not isinstance(item, str) or not item.strip() for item in keywords):
+            raise GeneratedPayloadValidationError("durst_data.ursachen.keywords must be a list of strings.")
+        if len({normalize_disease_name(item) for item in keywords}) != len(keywords):
+            raise GeneratedPayloadValidationError("durst_data.ursachen.keywords must not contain duplicates.")
+
+        risk_factors = durst_data.get("risikofaktoren")
+        if not isinstance(risk_factors, list) or any(not isinstance(item, str) or not item.strip() for item in risk_factors):
+            raise GeneratedPayloadValidationError("durst_data.risikofaktoren must be a list of strings.")
+
+        symptoms = durst_data.get("symptome")
+        if not isinstance(symptoms, dict):
+            raise GeneratedPayloadValidationError("durst_data.symptome must be an object.")
+        symptom_list = symptoms.get("list")
+        if not isinstance(symptom_list, list) or any(not isinstance(item, str) or not item.strip() for item in symptom_list):
+            raise GeneratedPayloadValidationError("durst_data.symptome.list must be a list of strings.")
+        red_flags = symptoms.get("red_flags")
+        if red_flags is not None and not isinstance(red_flags, str):
+            raise GeneratedPayloadValidationError("durst_data.symptome.red_flags must be a string.")
+
+        therapy = durst_data.get("therapie_massnahmen")
+        if not isinstance(therapy, dict):
+            raise GeneratedPayloadValidationError("durst_data.therapie_massnahmen must be an object.")
+        immediate_actions = therapy.get("immediate_actions")
+        if not isinstance(immediate_actions, list) or any(not isinstance(item, str) or not item.strip() for item in immediate_actions):
+            raise GeneratedPayloadValidationError("durst_data.therapie_massnahmen.immediate_actions must be a list of strings.")
+        diagnostic_gold_standard = therapy.get("diagnostic_gold_standard")
+        if diagnostic_gold_standard is not None and not isinstance(diagnostic_gold_standard, str):
+            raise GeneratedPayloadValidationError("durst_data.therapie_massnahmen.diagnostic_gold_standard must be a string.")
+        guideline_link = therapy.get("guideline_link")
+        if not isinstance(guideline_link, str) or not guideline_link.strip():
+            raise GeneratedPayloadValidationError("durst_data.therapie_massnahmen.guideline_link must be a URL string.")
+        self._validate_url(guideline_link, "durst_data.therapie_massnahmen.guideline_link")
+
+    def _validate_quiz_items(self, quiz_items):
+        seen_questions = set()
+        for index, question in enumerate(quiz_items, start=1):
+            if not isinstance(question, dict):
+                raise GeneratedPayloadValidationError(f"Quiz item {index} must be an object.")
+
+            question_text = question.get("question")
+            if not isinstance(question_text, str) or not question_text.strip():
+                raise GeneratedPayloadValidationError(f"Quiz item {index} needs a question string.")
+            normalized_question = normalize_disease_name(question_text)
+            if normalized_question in seen_questions:
+                raise GeneratedPayloadValidationError("Quiz questions must not be duplicated.")
+            seen_questions.add(normalized_question)
+
+            options = question.get("options")
+            if not isinstance(options, list) or len(options) != 4:
+                raise GeneratedPayloadValidationError(f"Quiz item {index} must contain exactly 4 options.")
+            if any(not isinstance(option, str) or not option.strip() for option in options):
+                raise GeneratedPayloadValidationError(f"Quiz item {index} contains invalid options.")
+            if len({normalize_disease_name(option) for option in options}) != len(options):
+                raise GeneratedPayloadValidationError(f"Quiz item {index} contains duplicate options.")
+
+            correct_index = question.get("correct_index")
+            if not isinstance(correct_index, int) or correct_index < 0 or correct_index >= len(options):
+                raise GeneratedPayloadValidationError(f"Quiz item {index} has an invalid correct_index.")
+
+            explanation = question.get("explanation")
+            if explanation is not None and not isinstance(explanation, str):
+                raise GeneratedPayloadValidationError(f"Quiz item {index} explanation must be a string.")
+
+    def _validate_sources(self, sources):
+        seen_links = set()
+        for index, source in enumerate(sources, start=1):
+            if not isinstance(source, dict):
+                raise GeneratedPayloadValidationError(f"Source item {index} must be an object.")
+
+            source_name = source.get("source_name")
+            link = source.get("link")
+            if not isinstance(source_name, str) or not source_name.strip():
+                raise GeneratedPayloadValidationError(f"Source item {index} must include source_name.")
+            if not isinstance(link, str) or not link.strip():
+                raise GeneratedPayloadValidationError(f"Source item {index} must include a URL link.")
+            self._validate_url(link, f"sources[{index - 1}].link")
+
+            normalized_link = link.strip().casefold()
+            if normalized_link in seen_links:
+                raise GeneratedPayloadValidationError("Duplicate source links are not allowed.")
+            seen_links.add(normalized_link)
+
+    def _validate_url(self, value, field_name):
+        try:
+            self.url_validator(value)
+        except Exception as exc:
+            raise GeneratedPayloadValidationError(f"{field_name} must be a valid URL.") from exc
+
+    def _store_validated_payload(self, ai_payload, requesting_user):
+        disease = Disease.objects.create(
+            owner=requesting_user,
+            disease_id=ai_payload.get("disease_id", "").strip(),
+            name=ai_payload.get("name", "").strip(),
+            image=ai_payload.get("image", "").strip(),
+            category=ai_payload.get("category", "").strip(),
+        )
+
+        durst_data_payload = ai_payload.get("durst_data", {})
+        durst_data = DurstData.objects.create(
+            disease=disease,
+            definition=durst_data_payload.get("definition", "").strip(),
+            ursachen=durst_data_payload.get("ursachen", {}).get("text", "").strip(),
+            red_flags=durst_data_payload.get("symptome", {}).get("red_flags", "") or "",
+            diagnostic_gold_standard=durst_data_payload.get("therapie_massnahmen", {}).get("diagnostic_gold_standard", "") or "",
+            guideline_link=durst_data_payload.get("therapie_massnahmen", {}).get("guideline_link", "").strip(),
+        )
+
+        UrsacheKeyword.objects.bulk_create([
+            UrsacheKeyword(durst_data=durst_data, keyword=keyword.strip())
+            for keyword in durst_data_payload.get("ursachen", {}).get("keywords", [])
+        ])
+
+        RiskFactor.objects.bulk_create([
+            RiskFactor(durst_data=durst_data, text=risk_factor.strip())
+            for risk_factor in durst_data_payload.get("risikofaktoren", [])
+        ])
+
+        Symptom.objects.bulk_create([
+            Symptom(durst_data=durst_data, text=symptom.strip())
+            for symptom in durst_data_payload.get("symptome", {}).get("list", [])
+        ])
+
+        ImmediateAction.objects.bulk_create([
+            ImmediateAction(durst_data=durst_data, text=action.strip())
+            for action in durst_data_payload.get("therapie_massnahmen", {}).get("immediate_actions", [])
+        ])
+
+        sources = []
+        seen_links = set()
+        for source in ai_payload.get("sources", []):
+            normalized_link = source["link"].strip().casefold()
+            if normalized_link in seen_links:
+                raise GeneratedPayloadValidationError("Duplicate source links are not allowed.")
+            seen_links.add(normalized_link)
+            sources.append(
+                Source(
+                    disease=disease,
+                    source_name=source["source_name"].strip(),
+                    link=source["link"].strip(),
+                )
+            )
+        Source.objects.bulk_create(sources)
+
+        quiz = Quiz.objects.create(disease=disease, title=f"Quiz for {disease.name}")
+        questions = [
+            Question(
+                quiz=quiz,
+                question=item["question"].strip(),
+                options=item["options"],
+                correct_index=item["correct_index"],
+                explanation=(item.get("explanation", "") or "").strip(),
+            )
+            for item in ai_payload.get("quiz", [])
+        ]
+        Question.objects.bulk_create(questions)
+
+        return disease
+
+
 def check_content_formatting(disease_content):
     try:
         return json.loads(disease_content)
@@ -164,14 +669,7 @@ def check_content_formatting(disease_content):
             raise ValueError('Gemini output was not valid JSON.')
 
 def find_disease_by_prompt(prompt):
-    response = gemini_client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-    config=types.GenerateContentConfig(system_instruction="du bist ein hochspezialisierter Experte fur deutsche Medizin und Notfall medizin. finde heraus welche Krankheit am besten zu der angebene Text passt.:"),
-    contents=prompt,
-    )
-    
-    disease_name = response.text.strip()
-    return disease_name
+    return GeminiProvider().resolve_disease_name(prompt)
 
 def create_disease_image_with_nanobanana(disease_name):
     prompt_image = f"generiere ein medizinisches Bild, das die Krankheit {disease_name} repräsentiert. Das Bild soll informativ und didaktisch sein, um die wichtigsten Merkmale der Krankheit zu veranschaulichen. Es sollte klare visuelle Elemente enthalten, die die Symptome, betroffenen Organe oder andere relevante Aspekte der Krankheit darstellen. Das Bild soll in einem Stil gehalten sein, der für medizinische Lehrmaterialien geeignet ist."
@@ -197,14 +695,7 @@ def create_disease_image_with_nanobanana(disease_name):
 
 def create_disease_json_for_durst(disease_name):
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-        config=types.GenerateContentConfig(system_instruction=prompt_json),
-        contents=disease_name,
-        )
-        disease_json = response.text.strip()
-        disease = check_content_formatting(disease_json)
-        return disease
+        return GeminiProvider().generate_disease_payload(disease_name)
     except Exception as e:
         logging.error(f"Error generating disease JSON for {disease_name}: {e}")
         raise
@@ -257,25 +748,10 @@ def transform_quiz(ai_json, disease_instance):
 
 
 def save_disease_json_in_database(disease_json, owner=None):
-    """Persist a disease document returned by the AI.
+    if owner is None:
+        raise ValueError("owner is required to persist a disease.")
 
-    The function delegates to :class:`DiseaseCreateSerializer` so that the
-    complete nested structure is handled in one shot.  ``owner`` may be passed in
-    (usually the request user); if omitted the serializer will raise when it
-    tries to access ``self.context['request']``.
-
-    The older transform logic remains available but is no longer used.
-    """
-    from pathology_app.api.serializers import DiseaseCreateSerializer
-
-    # the JSON coming from the model is already expected to match the create
-    # serializer's structure, so we can forward it directly.
-    context = {} if owner is None else {'request': type('O', (), {'user': owner})}
-    serializer = DiseaseCreateSerializer(data=disease_json, context=context)
-    if serializer.is_valid():
-        return serializer.save()
-    else:
-        raise ValueError(f"Invalid disease data: {serializer.errors}")
+    return DiseaseGenerationService().persist_ai_payload(disease_json, owner)
 
 
 
