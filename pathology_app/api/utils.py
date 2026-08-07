@@ -9,7 +9,7 @@ from typing import Optional
 from django.core.cache import cache
 from django.core.validators import URLValidator
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, ProgrammingError, transaction
 from django.db.models import Prefetch
 from django.db.models.functions import Lower, Trim
 from django.utils import timezone
@@ -194,9 +194,10 @@ def disease_queryset():
     )
 
 
-def disease_cache_key(normalized_name: str) -> str:
+def disease_cache_key(normalized_name: str, owner_id: Optional[int] = None) -> str:
     digest = hashlib.sha256(normalized_name.encode("utf-8")).hexdigest()
-    return f"disease-generation:{digest}"
+    owner_part = owner_id if owner_id is not None else "global"
+    return f"disease-generation:{owner_part}:{digest}"
 
 
 class DiseaseGenerationError(Exception):
@@ -228,7 +229,10 @@ class GeminiProvider(BaseDiseaseProvider):
             ),
             contents=prompt_text,
         )
-        return response.text.strip()
+        response_text = getattr(response, "text", None)
+        if not isinstance(response_text, str) or not response_text.strip():
+            raise GeneratedPayloadValidationError("Gemini did not return a disease name.")
+        return response_text.strip()
 
     def generate_disease_payload(self, disease_name: str) -> dict:
         response = gemini_client.models.generate_content(
@@ -236,7 +240,10 @@ class GeminiProvider(BaseDiseaseProvider):
             config=types.GenerateContentConfig(system_instruction=prompt_json),
             contents=disease_name,
         )
-        disease_json = response.text.strip()
+        response_text = getattr(response, "text", None)
+        if not isinstance(response_text, str) or not response_text.strip():
+            raise GeneratedPayloadValidationError("Gemini did not return disease data.")
+        disease_json = response_text.strip()
         return check_content_formatting(disease_json)
 
 
@@ -269,33 +276,102 @@ class DiseaseGenerationService:
     def get_or_generate(self, disease_name, requesting_user, prompt_text=None):
         requested_name = (disease_name or "").strip()
 
-        cached = self._get_cached_disease(requested_name)
+        cached = self._get_cached_disease(requested_name, requesting_user)
         if cached is not None:
             return cached
 
-        existing = self._find_existing_disease(requested_name)
+        existing = self._find_owner_disease(requested_name, requesting_user)
         if existing is not None:
             self._cache_disease(existing)
             return existing
 
+        reusable = self._find_reusable_disease(requested_name)
+        if reusable is not None:
+            cloned = self._clone_disease_for_owner(reusable, requesting_user)
+            self._cache_disease(cloned)
+            return cloned
+
         canonical_name = requested_name
         if prompt_text:
             canonical_name = self.provider.resolve_disease_name(prompt_text)
-            existing = self._find_existing_disease(canonical_name)
+            existing = self._find_owner_disease(canonical_name, requesting_user)
             if existing is not None:
                 self._cache_disease(existing)
                 return existing
+
+            reusable = self._find_reusable_disease(canonical_name)
+            if reusable is not None:
+                cloned = self._clone_disease_for_owner(reusable, requesting_user)
+                self._cache_disease(cloned)
+                return cloned
 
         if not canonical_name:
             raise GeneratedPayloadValidationError("Disease name is required.")
 
+        fallback_generation = None
+        try:
+            return self._generate_with_state(canonical_name, requesting_user)
+        except (OperationalError, ProgrammingError) as exc:
+            if not self._is_missing_generation_state_table(exc):
+                raise
+            logger.warning(
+                "DiseaseGenerationState table unavailable; continuing without generation-state tracking",
+                extra={"disease_name": canonical_name, "user_id": getattr(requesting_user, "id", None)},
+            )
+            fallback_generation = self._generate_without_state(canonical_name, requesting_user)
+
+        return fallback_generation
+
+    def persist_ai_payload(self, ai_payload, requesting_user, ai_model=None):
+        self._validate_generated_payload(ai_payload)
+        disease_name = ai_payload.get("name", "")
+
+        cached = self._get_cached_disease(disease_name, requesting_user)
+        if cached is not None:
+            return cached
+
+        existing = self._find_owner_disease(disease_name, requesting_user)
+        if existing is not None:
+            self._cache_disease(existing)
+            return existing
+
+        reusable = self._find_reusable_disease(disease_name)
+        if reusable is not None:
+            cloned = self._clone_disease_for_owner(reusable, requesting_user)
+            self._cache_disease(cloned)
+            return cloned
+
+        ai_model = ai_model or self.provider.model_name
+
+        fallback_generation = None
+        try:
+            return self._persist_with_state(ai_payload, requesting_user, ai_model)
+        except (OperationalError, ProgrammingError) as exc:
+            if not self._is_missing_generation_state_table(exc):
+                raise
+            logger.warning(
+                "DiseaseGenerationState table unavailable during persistence; continuing without generation-state tracking",
+                extra={"disease_name": disease_name, "user_id": getattr(requesting_user, "id", None)},
+            )
+            fallback_generation = self._persist_without_state(ai_payload, requesting_user)
+
+        return fallback_generation
+
+    def _generate_with_state(self, canonical_name, requesting_user):
         with transaction.atomic():
             state = self._lock_generation_state(canonical_name)
-            existing = self._find_existing_disease(canonical_name)
+            existing = self._find_owner_disease(canonical_name, requesting_user)
             if existing is not None:
                 self._attach_existing_disease(state, existing)
                 self._cache_disease(existing)
                 return existing
+
+            reusable = self._find_reusable_disease(canonical_name)
+            if reusable is not None:
+                disease = self._clone_disease_for_owner(reusable, requesting_user)
+                self._attach_existing_disease(state, reusable)
+                self._cache_disease(disease)
+                return disease
 
             state.original_name = canonical_name
             state.status = DiseaseGenerationState.Status.GENERATING
@@ -307,6 +383,16 @@ class DiseaseGenerationService:
                 ai_payload = self.provider.generate_disease_payload(canonical_name)
                 self._validate_generated_payload(ai_payload)
                 disease = self._store_validated_payload(ai_payload, requesting_user)
+            except GeneratedPayloadValidationError as exc:
+                state.status = DiseaseGenerationState.Status.FAILED
+                state.ai_model = self.provider.model_name
+                state.generation_error = str(exc)
+                state.save(update_fields=["status", "ai_model", "generation_error", "updated_at"])
+                logger.info(
+                    "Disease generation validation failed",
+                    extra={"disease_name": canonical_name, "user_id": getattr(requesting_user, "id", None)},
+                )
+                raise
             except Exception as exc:
                 state.status = DiseaseGenerationState.Status.FAILED
                 state.ai_model = self.provider.model_name
@@ -319,28 +405,22 @@ class DiseaseGenerationService:
             self._cache_disease(disease)
             return disease
 
-    def persist_ai_payload(self, ai_payload, requesting_user, ai_model=None):
-        self._validate_generated_payload(ai_payload)
+    def _persist_with_state(self, ai_payload, requesting_user, ai_model):
         disease_name = ai_payload.get("name", "")
-
-        cached = self._get_cached_disease(disease_name)
-        if cached is not None:
-            return cached
-
-        existing = self._find_existing_disease(disease_name)
-        if existing is not None:
-            self._cache_disease(existing)
-            return existing
-
-        ai_model = ai_model or self.provider.model_name
-
         with transaction.atomic():
             state = self._lock_generation_state(disease_name)
-            existing = self._find_existing_disease(disease_name)
+            existing = self._find_owner_disease(disease_name, requesting_user)
             if existing is not None:
                 self._attach_existing_disease(state, existing)
                 self._cache_disease(existing)
                 return existing
+
+            reusable = self._find_reusable_disease(disease_name)
+            if reusable is not None:
+                disease = self._clone_disease_for_owner(reusable, requesting_user)
+                self._attach_existing_disease(state, reusable)
+                self._cache_disease(disease)
+                return disease
 
             state.original_name = disease_name
             state.status = DiseaseGenerationState.Status.GENERATING
@@ -350,6 +430,16 @@ class DiseaseGenerationService:
 
             try:
                 disease = self._store_validated_payload(ai_payload, requesting_user)
+            except GeneratedPayloadValidationError as exc:
+                state.status = DiseaseGenerationState.Status.FAILED
+                state.ai_model = ai_model
+                state.generation_error = str(exc)
+                state.save(update_fields=["status", "ai_model", "generation_error", "updated_at"])
+                logger.info(
+                    "Disease persistence validation failed",
+                    extra={"disease_name": disease_name, "user_id": getattr(requesting_user, "id", None)},
+                )
+                raise
             except Exception as exc:
                 state.status = DiseaseGenerationState.Status.FAILED
                 state.ai_model = ai_model
@@ -362,26 +452,112 @@ class DiseaseGenerationService:
             self._cache_disease(disease)
             return disease
 
-    def _get_cached_disease(self, disease_name):
+    def _generate_without_state(self, canonical_name, requesting_user):
+        existing = self._find_owner_disease(canonical_name, requesting_user)
+        if existing is not None:
+            self._cache_disease(existing)
+            return existing
+
+        reusable = self._find_reusable_disease(canonical_name)
+        if reusable is not None:
+            cloned = self._clone_disease_for_owner(reusable, requesting_user)
+            self._cache_disease(cloned)
+            return cloned
+
+        with transaction.atomic():
+            existing = self._find_owner_disease(canonical_name, requesting_user)
+            if existing is not None:
+                self._cache_disease(existing)
+                return existing
+
+            reusable = self._find_reusable_disease(canonical_name)
+            if reusable is not None:
+                cloned = self._clone_disease_for_owner(reusable, requesting_user)
+                self._cache_disease(cloned)
+                return cloned
+
+            ai_payload = self.provider.generate_disease_payload(canonical_name)
+            self._validate_generated_payload(ai_payload)
+            disease = self._store_validated_payload(ai_payload, requesting_user)
+
+        self._cache_disease(disease)
+        return disease
+
+    def _persist_without_state(self, ai_payload, requesting_user):
+        disease_name = ai_payload.get("name", "")
+        existing = self._find_owner_disease(disease_name, requesting_user)
+        if existing is not None:
+            self._cache_disease(existing)
+            return existing
+
+        reusable = self._find_reusable_disease(disease_name)
+        if reusable is not None:
+            cloned = self._clone_disease_for_owner(reusable, requesting_user)
+            self._cache_disease(cloned)
+            return cloned
+
+        with transaction.atomic():
+            existing = self._find_owner_disease(disease_name, requesting_user)
+            if existing is not None:
+                self._cache_disease(existing)
+                return existing
+
+            reusable = self._find_reusable_disease(disease_name)
+            if reusable is not None:
+                cloned = self._clone_disease_for_owner(reusable, requesting_user)
+                self._cache_disease(cloned)
+                return cloned
+
+            disease = self._store_validated_payload(ai_payload, requesting_user)
+
+        self._cache_disease(disease)
+        return disease
+
+    def _is_missing_generation_state_table(self, exc):
+        return "pathology_app_diseasegenerationstate" in str(exc).casefold()
+
+    def _get_cached_disease(self, disease_name, requesting_user=None):
         normalized_name = normalize_disease_name(disease_name)
         if not normalized_name:
             return None
 
-        cache_value = self.cache.get(disease_cache_key(normalized_name))
+        owner_id = getattr(requesting_user, "id", None)
+        cache_value = self.cache.get(disease_cache_key(normalized_name, owner_id))
         if cache_value is None:
             return None
 
-        return self._fetch_disease_by_id(cache_value)
+        disease = self._fetch_disease_by_id(cache_value)
+        if disease is None:
+            self.cache.delete(disease_cache_key(normalized_name, owner_id))
+            return None
+
+        if owner_id is not None and disease.owner_id != owner_id:
+            self.cache.delete(disease_cache_key(normalized_name, owner_id))
+            return None
+
+        return disease
 
     def _cache_disease(self, disease):
         normalized_name = normalize_disease_name(disease.name)
         if normalized_name:
-            self.cache.set(disease_cache_key(normalized_name), disease.id, timeout=None)
+            self.cache.set(disease_cache_key(normalized_name, disease.owner_id), disease.id, timeout=None)
 
     def _fetch_disease_by_id(self, disease_id):
         return disease_queryset().filter(id=disease_id).first()
 
-    def _find_existing_disease(self, disease_name):
+    def _find_owner_disease(self, disease_name, requesting_user):
+        normalized_name = normalize_disease_name(disease_name)
+        if not normalized_name:
+            return None
+
+        return (
+            disease_queryset()
+            .annotate(normalized_name_db=Lower(Trim("name")))
+            .filter(normalized_name_db=normalized_name, owner=requesting_user)
+            .first()
+        )
+
+    def _find_reusable_disease(self, disease_name):
         normalized_name = normalize_disease_name(disease_name)
         if not normalized_name:
             return None
@@ -390,8 +566,73 @@ class DiseaseGenerationService:
             disease_queryset()
             .annotate(normalized_name_db=Lower(Trim("name")))
             .filter(normalized_name_db=normalized_name)
+            .order_by("created_at", "id")
             .first()
         )
+
+    def _clone_disease_for_owner(self, source_disease, requesting_user):
+        if source_disease.owner_id == getattr(requesting_user, "id", None):
+            return source_disease
+
+        existing = Disease.objects.filter(owner=requesting_user, disease_id=source_disease.disease_id).first()
+        if existing is not None:
+            return self._fetch_disease_by_id(existing.id)
+
+        cloned_disease = Disease.objects.create(
+            owner=requesting_user,
+            disease_id=source_disease.disease_id,
+            name=source_disease.name,
+            image=source_disease.image,
+            category=source_disease.category,
+        )
+
+        source_durst = getattr(source_disease, "durst_data", None)
+        if source_durst is not None:
+            cloned_durst = DurstData.objects.create(
+                disease=cloned_disease,
+                definition=source_durst.definition,
+                ursachen=source_durst.ursachen,
+                red_flags=source_durst.red_flags,
+                diagnostic_gold_standard=source_durst.diagnostic_gold_standard,
+                guideline_link=source_durst.guideline_link,
+            )
+
+            UrsacheKeyword.objects.bulk_create([
+                UrsacheKeyword(durst_data=cloned_durst, keyword=item.keyword)
+                for item in source_durst.ursache_keywords.all()
+            ])
+            RiskFactor.objects.bulk_create([
+                RiskFactor(durst_data=cloned_durst, text=item.text)
+                for item in source_durst.risk_factors.all()
+            ])
+            Symptom.objects.bulk_create([
+                Symptom(durst_data=cloned_durst, text=item.text)
+                for item in source_durst.symptoms.all()
+            ])
+            ImmediateAction.objects.bulk_create([
+                ImmediateAction(durst_data=cloned_durst, text=item.text)
+                for item in source_durst.immediate_actions.all()
+            ])
+
+        Source.objects.bulk_create([
+            Source(disease=cloned_disease, source_name=source.source_name, link=source.link)
+            for source in source_disease.sources.all()
+        ])
+
+        for source_quiz in source_disease.quizzes.all():
+            cloned_quiz = Quiz.objects.create(disease=cloned_disease, title=source_quiz.title)
+            Question.objects.bulk_create([
+                Question(
+                    quiz=cloned_quiz,
+                    question=question.question,
+                    options=question.options,
+                    correct_index=question.correct_index,
+                    explanation=question.explanation,
+                )
+                for question in source_quiz.questions.all()
+            ])
+
+        return self._fetch_disease_by_id(cloned_disease.id)
 
     def _lock_generation_state(self, disease_name):
         normalized_name = normalize_disease_name(disease_name)
@@ -655,18 +896,22 @@ class DiseaseGenerationService:
 
 
 def check_content_formatting(disease_content):
+    if not isinstance(disease_content, str) or not disease_content.strip():
+        raise GeneratedPayloadValidationError('Gemini output was empty.')
+
     try:
         return json.loads(disease_content)
     except json.JSONDecodeError:
-        '''
-        If the model mixes text with JSON → look for JSON part
-        '''
+        # If the model mixes prose with JSON, extract the object body.
         start = disease_content.find('{')
         end = disease_content.rfind('}') + 1
-        if start != -1 and end != -1:
-            return json.loads(disease_content[start:end])
-        else:
-            raise ValueError('Gemini output was not valid JSON.')
+        if start != -1 and end > start:
+            try:
+                return json.loads(disease_content[start:end])
+            except json.JSONDecodeError as exc:
+                raise GeneratedPayloadValidationError('Gemini output was not valid JSON.') from exc
+
+        raise GeneratedPayloadValidationError('Gemini output was not valid JSON.')
 
 def find_disease_by_prompt(prompt):
     return GeminiProvider().resolve_disease_name(prompt)

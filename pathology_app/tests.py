@@ -2,6 +2,7 @@ import os
 import tempfile
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.db import ProgrammingError
 from django.test import TestCase
 from django.test import override_settings
 from rest_framework.test import APIClient
@@ -9,6 +10,7 @@ from unittest import mock
 
 from pathology_app.api.utils import create_disease_image_with_nanobanana
 from pathology_app.api.utils import DiseaseGenerationService
+from pathology_app.api.utils import GeneratedPayloadValidationError
 from pathology_app.models import Disease, Quiz, Question, QuizAttempt
 
 
@@ -84,8 +86,9 @@ class GenerateDiseaseFailureTests(TestCase):
         )
         self.client.force_authenticate(user=self.user)
 
+    @mock.patch('pathology_app.api.views.logger.error')
     @mock.patch('pathology_app.api.views.DiseaseGenerationService.get_or_generate')
-    def test_generation_error_is_redacted(self, mock_get_or_generate):
+    def test_generation_error_is_redacted(self, mock_get_or_generate, mock_logger_error):
         mock_get_or_generate.side_effect = Exception('internal-sdk-error-with-sensitive-data')
 
         response = self.client.post('/api/generate_disease/', {'prompt': 'something'}, format='json')
@@ -93,6 +96,58 @@ class GenerateDiseaseFailureTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.data['detail'], 'AI generation failed. Please try again later.')
         self.assertNotIn('internal-sdk-error-with-sensitive-data', response.data['detail'])
+        mock_logger_error.assert_called_once()
+
+    @mock.patch('pathology_app.api.views.DiseaseGenerationService.get_or_generate')
+    def test_generation_validation_error_returns_400(self, mock_get_or_generate):
+        mock_get_or_generate.side_effect = GeneratedPayloadValidationError('Gemini output was not valid JSON.')
+
+        response = self.client.post('/api/generate_disease/', {'prompt': 'something'}, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 'Gemini output was not valid JSON.')
+
+
+class DiseaseDetailAccessTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = get_user_model().objects.create_user(
+            username='detail_owner',
+            email='detail_owner@example.com',
+            password='StrongPassword#2026',
+        )
+        self.disease = Disease.objects.create(
+            disease_id='DETAIL-001',
+            owner=self.owner,
+            name='Detail Disease',
+            category='Neurology',
+        )
+
+    def test_anonymous_detail_is_read_only_accessible(self):
+        response = self.client.get(f'/api/diseases/{self.disease.disease_id}/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['disease_id'], 'DETAIL-001')
+
+    def test_authenticated_user_gets_own_duplicate_disease_detail(self):
+        other_user = get_user_model().objects.create_user(
+            username='detail_other',
+            email='detail_other@example.com',
+            password='StrongPassword#2026',
+        )
+        other_disease = Disease.objects.create(
+            disease_id='DETAIL-001',
+            owner=other_user,
+            name='Other Detail Disease',
+            category='Cardiology',
+        )
+
+        self.client.force_authenticate(user=other_user)
+        response = self.client.get(f'/api/diseases/{self.disease.disease_id}/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], other_disease.id)
+        self.assertEqual(response.data['name'], 'Other Detail Disease')
 
 
 class DiseaseGenerationReuseTests(TestCase):
@@ -100,6 +155,7 @@ class DiseaseGenerationReuseTests(TestCase):
         self.client = APIClient()
         User = get_user_model()
         self.user = User.objects.create_user(username='reuse_user', email='reuse_user@example.com', password='StrongPassword#2026')
+        self.other_user = User.objects.create_user(username='reuse_other_user', email='reuse_other_user@example.com', password='StrongPassword#2026')
 
     def test_existing_disease_short_circuits_before_provider(self):
         disease = Disease.objects.create(
@@ -119,6 +175,154 @@ class DiseaseGenerationReuseTests(TestCase):
         self.assertEqual(result.id, disease.id)
         mock_provider.resolve_disease_name.assert_not_called()
         mock_provider.generate_disease_payload.assert_not_called()
+
+    def test_invalid_provider_json_becomes_validation_error(self):
+        mock_provider = mock.Mock()
+        mock_provider.model_name = 'mock-gemini'
+        mock_provider.resolve_disease_name.return_value = 'Fresh Disease'
+        mock_provider.generate_disease_payload.side_effect = GeneratedPayloadValidationError('Gemini output was not valid JSON.')
+
+        service = DiseaseGenerationService(provider=mock_provider)
+
+        with self.assertRaises(GeneratedPayloadValidationError):
+            service.get_or_generate('prompt text', self.user, prompt_text='prompt text')
+
+    def test_existing_disease_is_cloned_for_other_owner_without_provider_call(self):
+        disease = Disease.objects.create(
+            disease_id='REUSE-CLONE-001',
+            owner=self.user,
+            name='Clone Disease',
+            category='Category',
+            image='https://example.com/clone.png',
+        )
+        durst_data = disease.durst_data = disease._meta.get_field('id') and None
+        from pathology_app.models import DurstData, ImmediateAction, RiskFactor, Source, Symptom, UrsacheKeyword
+        durst_data = DurstData.objects.create(
+            disease=disease,
+            definition='Definition',
+            ursachen='Cause text',
+            red_flags='Red flag',
+            diagnostic_gold_standard='CT',
+            guideline_link='https://example.com/guideline',
+        )
+        UrsacheKeyword.objects.create(durst_data=durst_data, keyword='Keyword A')
+        RiskFactor.objects.create(durst_data=durst_data, text='Risk A')
+        Symptom.objects.create(durst_data=durst_data, text='Symptom A')
+        ImmediateAction.objects.create(durst_data=durst_data, text='Action A')
+        Source.objects.create(disease=disease, source_name='Source A', link='https://example.com/source-a')
+        quiz = Quiz.objects.create(disease=disease, title='Quiz for Clone Disease')
+        Question.objects.create(
+            quiz=quiz,
+            question='Question 1',
+            options=['A', 'B', 'C', 'D'],
+            correct_index=1,
+            explanation='Because B',
+        )
+
+        mock_provider = mock.Mock()
+        mock_provider.resolve_disease_name.side_effect = AssertionError('resolve_disease_name should not run')
+        mock_provider.generate_disease_payload.side_effect = AssertionError('generate_disease_payload should not run')
+
+        service = DiseaseGenerationService(provider=mock_provider)
+        result = service.get_or_generate('Clone Disease', self.other_user, prompt_text='Clone Disease')
+
+        self.assertNotEqual(result.id, disease.id)
+        self.assertEqual(result.owner_id, self.other_user.id)
+        self.assertEqual(result.disease_id, disease.disease_id)
+        self.assertEqual(result.durst_data.definition, 'Definition')
+        self.assertEqual(result.durst_data.ursache_keywords.count(), 1)
+        self.assertEqual(result.sources.count(), 1)
+        self.assertEqual(result.quizzes.count(), 1)
+        self.assertEqual(result.quizzes.first().questions.count(), 1)
+        mock_provider.resolve_disease_name.assert_not_called()
+        mock_provider.generate_disease_payload.assert_not_called()
+
+    def test_cached_reuse_is_isolated_per_owner(self):
+        disease = Disease.objects.create(
+            disease_id='REUSE-CACHE-001',
+            owner=self.user,
+            name='Cache Disease',
+            category='Category',
+        )
+
+        service = DiseaseGenerationService(provider=mock.Mock())
+        service._cache_disease(disease)
+
+        self.assertIsNone(service._get_cached_disease('Cache Disease', self.other_user))
+
+
+class DiseaseGenerationStateFallbackTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='state_fallback_user',
+            email='state_fallback_user@example.com',
+            password='StrongPassword#2026',
+        )
+
+    def _valid_payload(self, disease_id='FALLBACK-001', name='Fallback Disease'):
+        return {
+            'disease_id': disease_id,
+            'name': name,
+            'image': 'https://example.com/fallback.png',
+            'category': 'Emergency Medicine',
+            'durst_data': {
+                'definition': 'Definition',
+                'ursachen': {'text': 'Cause text', 'keywords': ['Keyword A', 'Keyword B']},
+                'risikofaktoren': ['Risk A'],
+                'symptome': {'list': ['Symptom A'], 'red_flags': 'Red flag'},
+                'therapie_massnahmen': {
+                    'immediate_actions': ['Action A'],
+                    'diagnostic_gold_standard': 'CT',
+                    'guideline_link': 'https://example.com/guideline',
+                },
+            },
+            'quiz': [
+                {
+                    'question': f'Question {index}',
+                    'options': ['A', 'B', 'C', 'D'],
+                    'correct_index': 0,
+                    'explanation': 'Explanation',
+                }
+                for index in range(1, 6)
+            ],
+            'sources': [
+                {'source_name': 'Source A', 'link': 'https://example.com/source-a'},
+                {'source_name': 'Source B', 'link': 'https://example.com/source-b'},
+            ],
+        }
+
+    def test_get_or_generate_falls_back_when_generation_state_table_is_missing(self):
+        provider = mock.Mock()
+        provider.model_name = 'mock-gemini'
+        provider.resolve_disease_name.return_value = 'Fallback Disease'
+        provider.generate_disease_payload.return_value = self._valid_payload()
+
+        service = DiseaseGenerationService(provider=provider)
+
+        with mock.patch.object(
+            service,
+            '_lock_generation_state',
+            side_effect=ProgrammingError('relation "pathology_app_diseasegenerationstate" does not exist'),
+        ):
+            disease = service.get_or_generate('prompt text', self.user, prompt_text='prompt text')
+
+        self.assertEqual(disease.name, 'Fallback Disease')
+        self.assertEqual(disease.owner_id, self.user.id)
+        provider.generate_disease_payload.assert_called_once_with('Fallback Disease')
+
+    def test_persist_ai_payload_falls_back_when_generation_state_table_is_missing(self):
+        service = DiseaseGenerationService(provider=mock.Mock(model_name='mock-gemini'))
+        payload = self._valid_payload(disease_id='FALLBACK-002', name='Fallback Persist Disease')
+
+        with mock.patch.object(
+            service,
+            '_lock_generation_state',
+            side_effect=ProgrammingError('relation "pathology_app_diseasegenerationstate" does not exist'),
+        ):
+            disease = service.persist_ai_payload(payload, self.user)
+
+        self.assertEqual(disease.name, 'Fallback Persist Disease')
+        self.assertEqual(disease.owner_id, self.user.id)
 
 
 class DiseaseIdUniquenessTests(TestCase):

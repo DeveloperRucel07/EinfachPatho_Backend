@@ -55,6 +55,24 @@ class DiseaseDetailView(generics.RetrieveAPIView):
     authentication_classes = [CookieJWTAuthentication]
     lookup_field = "disease_id"
 
+    def get_object(self):
+        disease_id = self.kwargs[self.lookup_field]
+        queryset = Disease.objects.filter(disease_id=disease_id).order_by('-created_at', '-id')
+
+        user = self.request.user
+        if user.is_authenticated and not (user.is_staff or user.is_superuser):
+            owned = queryset.filter(owner=user).first()
+            if owned is not None:
+                self.check_object_permissions(self.request, owned)
+                return owned
+
+        obj = queryset.first()
+        if obj is None:
+            raise get_object_or_404(Disease, disease_id=disease_id)
+
+        self.check_object_permissions(self.request, obj)
+        return obj
+
 
 class GenerateDiseaseView(APIView):
     """
@@ -83,6 +101,8 @@ class GenerateDiseaseView(APIView):
 
             try:
                 disease = service.get_or_generate(prompt_text, request.user, prompt_text=prompt_text)
+            except GeneratedPayloadValidationError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             except DiseaseGenerationError as exc:
                 logger.error("AI generation failed", extra={"user_id": request.user.id, "error": str(exc)})
                 return Response(
