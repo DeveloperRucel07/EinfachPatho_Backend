@@ -173,7 +173,7 @@ prompt_json ="""
     """
 
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
 
 def normalize_disease_name(name: Optional[str]) -> str:
